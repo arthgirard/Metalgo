@@ -6,14 +6,22 @@ LON = -73.417
 def interpret_weather_code(code):
     """
     Translates WMO code (0-99) to (Description, Sales Factor).
-    Description remains in French for frontend display.
+    Updated to be more generous with "Sunny" conditions.
     """
     # 0: Clear sky -> Excellent sales (+20%)
     if code == 0: 
         return "Ensoleillé", 1.2
     
-    # 1-3: Partly cloudy -> Standard
-    if 1 <= code <= 3: 
+    # 1: Mainly clear -> Considered Sunny for the user (+10%)
+    if code == 1:
+        return "Ensoleillé", 1.1 
+    
+    # 2: Partly cloudy -> Variable/Standard
+    if code == 2:
+        return "Variable", 1.0
+        
+    # 3: Overcast -> Cloudy
+    if code == 3:
         return "Nuageux", 1.0 
     
     # 45-48: Fog -> Slight decrease (-10%)
@@ -44,7 +52,7 @@ def get_current_weather():
     """
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&current=weather_code&timezone=America%2FNew_York"
-        response = requests.get(url, timeout=5) 
+        response = requests.get(url, timeout=10) 
         data = response.json()
         
         code = data['current']['weather_code']
