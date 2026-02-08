@@ -35,8 +35,8 @@ The application combines real-time sales logging with machine learning to provid
 
 3.  **Run the Application**
     python app.py
-    # The database is initialized automatically on first run.
-    # Access at http://localhost:5000
+    ### The database is initialized automatically on first run.
+    ### Access at http://localhost:5000
 
 ## 🧠 Machine Learning Model
 
