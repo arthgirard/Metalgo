@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Metalgo</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body data-ouvert="{{ 'true' if est_ouvert else 'false' }}">
+
+    <div id="view-saisie" class="tab-content active glass-container">
+        <div class="brand-header">
+            <img src="{{ url_for('static', filename='logo.png') }}" alt="Metalgo Logo" class="brand-logo">
+            <h1 class="brand-title">
+                <span class="text-met">Met</span><span class="text-algo">algo</span>
+            </h1>
+        </div>
+
+        <div class="glass-card">
+            <h2>Ventes directes</h2>
+            <div class="grid-container">
+                <button class="btn-vente" onclick="sendLog('VENTE', '250g')">250g</button>
+                <button class="btn-vente" onclick="sendLog('VENTE', '1kg')">1 kg</button>
+                <button class="btn-vente" onclick="sendLog('VENTE', '2kg')">2 kg</button>
+            </div>
+        </div>
+
+        <div class="glass-card">
+            <h2>Conversions</h2>
+            <div class="grid-container">
+                <button class="btn-conv" onclick="sendLog('CONVERSION', '2kg → 1 kg')">2kg &rarr; 1kg</button>
+                <button class="btn-conv" onclick="sendLog('CONVERSION', '2kg → 250g')">2kg &rarr; 250g</button>
+                <button class="btn-conv" onclick="sendLog('CONVERSION', '1kg →250g')">1kg &rarr; 250g</button>
+            </div>
+        </div>
+
+        <div class="glass-card history-container">
+            <h3 style="margin-top:0; font-size:0.9rem; color:#a0a7b8; text-transform:uppercase; letter-spacing:1px;">Derniers ajouts</h3>
+            <div id="history-list">
+                <div style="color:#666; font-style:italic; font-size:0.8rem;">Aucune action récente</div>
+            </div>
+        </div>
+
+        <button class="btn-undo" onclick="undoLastAction()">↩ Annuler la dernière action</button>
+    </div>
+
+    <div id="view-stats" class="tab-content">
+        <h1>📊 <span>Aujourd'hui</span></h1>
+        
+        <div class="glass-card stats-card">
+            <h2 style="text-align:center; margin-bottom:15px;">Volumes Vendus</h2>
+            <div class="stats-container">
+                <div class="stat-box">
+                    <div class="stat-number" id="count-250g">0</div>
+                    <div class="stat-label">250g</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number" id="count-1kg">0</div>
+                    <div class="stat-label">1 kg</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number" id="count-2kg">0</div>
+                    <div class="stat-label">2 kg</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="glass-card mini-card">
+                <div class="stat-box">
+                    <div class="stat-number" id="stat-peak" style="color: var(--accent-conv-start);">--</div>
+                    <div class="stat-label">Heure Forte</div>
+                </div>
+            </div>
+
+            <div class="glass-card mini-card">
+                <div class="stat-box">
+                    <div class="stat-number" id="stat-top" style="color: var(--accent-sale-start);">--</div>
+                    <div class="stat-label">Top Format</div>
+                </div>
+            </div>
+
+            <div class="glass-card mini-card">
+                <div class="stat-box">
+                    <div class="stat-number" id="stat-mass" style="color: var(--accent-blue);">0 kg</div>
+                    <div class="stat-label">Volume Total</div>
+                </div>
+            </div>
+
+            <div class="glass-card mini-card">
+                <div class="stat-box">
+                    <div class="stat-number" id="stat-conv" style="color: #9b59b6;">0</div>
+                    <div class="stat-label">Conversions</div>
+                </div>
+            </div>
+        </div>
+        
+        <p class="info-text">Données calculées en temps réel.</p>
+    </div>
+
+    <div id="view-predict" class="tab-content">
+        <h1>🔮 <span>Prévisions</span></h1>
+
+        <div id="event-banner" style="display: none; background: linear-gradient(90deg, #8e44ad, #c0392b); padding: 15px; border-radius: 15px; margin-bottom: 20px; text-align: center; box-shadow: 0 4px 15px rgba(142, 68, 173, 0.4);">
+            <div style="font-size: 1.5rem; margin-bottom: 5px;" id="event-icon">🎉</div>
+            <div style="font-weight: bold; font-size: 1.1rem; color: white;" id="event-name">Nom Événement</div>
+            <div style="font-size: 0.8rem; color: #ffcccc;">Achalandage accru prévu</div>
+        </div>
+
+        <div class="segmented-control">
+            <button class="seg-btn active" onclick="switchPredict('day', this)">Aujourd'hui</button>
+            <button class="seg-btn" onclick="switchPredict('week', this)">7 Jours</button>
+        </div>
+        
+        <div id="predict-day-content">
+            <div class="glass-card prediction-card">
+                
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <div style="text-align: left;">
+                        <span style="color: #a0a7b8; font-size: 0.8rem;">Temps restant</span><br>
+                        <span id="time-left" style="color: #fff; font-weight: bold; font-size: 1.2rem;">--</span> <span style="font-size:0.8rem">h</span>
+                    </div>
+                    
+                    <div style="text-align: right;">
+                        <span style="color: #a0a7b8; font-size: 0.8rem;">Météo</span><br>
+                        <span id="meteo-label" style="color: #fff; font-weight: bold;">--</span>
+                    </div>
+                </div>
+
+                <div id="trend-container" style="text-align: center; margin-bottom: 20px; display: none;">
+                    <span id="trend-badge" class="trend-badge">
+                        🚀 Rush détecté (+20%)
+                    </span>
+                </div>
+
+                <div class="stats-container">
+                    <div class="stat-box pred-box">
+                        <div class="stat-number pred-number" id="pred-250g">0</div>
+                        <div class="stat-label">250g</div>
+                    </div>
+                    <div class="stat-box pred-box">
+                        <div class="stat-number pred-number" id="pred-1kg">0</div>
+                        <div class="stat-label">1 kg</div>
+                    </div>
+                    <div class="stat-box pred-box">
+                        <div class="stat-number pred-number" id="pred-2kg">0</div>
+                        <div class="stat-label">2 kg</div>
+                    </div>
+                </div>
+
+                <button id="btn-retrain" class="btn-tech" onclick="retrainModel()">
+                    🧠 Recalibrer le modèle
+                </button>
+                <p id="retrain-msg" style="text-align: center; font-size: 0.8rem; margin-top: 10px; color: var(--accent-sale-start); display: none;"></p>
+                
+                <p id="prediction-info" class="info-text">En attente de données...</p>
+            </div>
+        </div>
+
+        <div id="predict-week-content" style="display: none;">
+            <div id="loading-week" style="text-align:center; margin-top:20px;">Chargement IA... 🤖</div>
+            <div id="week-list"></div>
+        </div>
+    </div>
+
+    <div id="notification-container"></div>
+
+    <div id="overlay-fermeture" class="closed-overlay" style="display: {{ 'none' if est_ouvert else 'flex' }};">
+        </div>
+
+    <div class="floating-nav">
+        <button class="nav-btn active" onclick="changerOnglet('view-saisie', this)">
+            <span>📝</span> Saisie
+        </button>
+        <button class="nav-btn" onclick="changerOnglet('view-stats', this)">
+            <span>📊</span> Stats
+        </button>
+        <button class="nav-btn" onclick="changerOnglet('view-predict', this)">
+            <span>🔮</span> Futur
+        </button>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
