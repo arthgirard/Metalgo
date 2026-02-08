@@ -142,14 +142,16 @@ button:active {
     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
 
+/* Updated Class Name: .btn-sale (was .btn-vente) */
 .btn-sale {
     background: linear-gradient(135deg, var(--accent-sale-start), var(--accent-sale-end));
 }
 
+/* Updated Class Name: .btn-conversion (was .btn-conv) */
 .btn-conversion {
     background: linear-gradient(135deg, var(--accent-conv-start), var(--accent-conv-end));
-    font-size: 0.9rem;
-    padding: 18px 5px;
+    font-size: 0.9rem;  /* Kept smaller font to fit text */
+    padding: 18px 5px;  /* Kept tighter padding */
 }
 
 .btn-undo {
@@ -338,7 +340,6 @@ button:active {
     animation: slideIn 0.3s ease-out;
 }
 
-/* Note: 'VENTE' and 'CONVERSION' correspond to Database values. */
 .history-item.type-VENTE {
     border-left-color: var(--accent-sale-start);
     background: linear-gradient(
