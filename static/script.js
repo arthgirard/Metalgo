@@ -276,7 +276,7 @@ function retrainModel() {
         msg.style.color = "#2ecc71";
 
         setTimeout(() => {
-            btn.innerHTML = "🧠 Réentrainer le modèle";
+            btn.innerHTML = "🧠 Recalibrer le modèle";
             btn.style.background = ""; 
             btn.disabled = false;
             msg.style.display = 'none';
