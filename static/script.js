@@ -31,11 +31,20 @@ function changerOnglet(viewId, button) {
 }
 
 // --- LOGS & ACTIONS ---
-function sendLog(type, detail) {
+// Action logging with loading state
+function sendLog(type, detail, btnElement = null) {
     if (navigator.vibrate) {
         navigator.vibrate(15); 
     }
     
+    let originalText = "";
+    if (btnElement) {
+        originalText = btnElement.innerHTML;
+        btnElement.innerHTML = "..."; 
+        btnElement.classList.add('btn-loading');
+        btnElement.disabled = true;
+    }
+
     fetch('/api/log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -46,10 +55,25 @@ function sendLog(type, detail) {
         updateStats();
         updateHistory();
     })
-    .catch(err => console.error(err));
+    .catch(err => console.error(err))
+    .finally(() => {
+        if (btnElement) {
+            btnElement.innerHTML = originalText;
+            btnElement.classList.remove('btn-loading');
+            btnElement.disabled = false;
+        }
+    });
 }
 
-function undoLastAction() {
+function undoLastAction(btnElement = null) {
+    let originalText = "";
+    if (btnElement) {
+        originalText = btnElement.innerHTML;
+        btnElement.innerHTML = "...";
+        btnElement.classList.add('btn-loading');
+        btnElement.disabled = true;
+    }
+
     fetch('/api/undo', { method: 'POST' })
     .then(res => res.json())
     .then(data => {
@@ -58,6 +82,14 @@ function undoLastAction() {
             updateHistory();
         } else {
             alert("Rien à annuler !");
+        }
+    })
+    .catch(err => console.error(err))
+    .finally(() => {
+        if (btnElement) {
+            btnElement.innerHTML = originalText;
+            btnElement.classList.remove('btn-loading');
+            btnElement.disabled = false;
         }
     });
 }
