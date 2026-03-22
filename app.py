@@ -270,8 +270,10 @@ def get_prediction():
                 
                 # Apply Trend
                 final_total = real_sales.get(fmt, 0) + (pred_future * trend_ratio)
-                to_produce = pred_future * trend_ratio * event_factor
-                predictions[fmt] = int(to_produce + 0.99)
+                current_trend = trend_ratio if fmt != '2kg' else min(trend_ratio, 1.1) 
+                to_produce = pred_future * current_trend * event_factor
+
+                predictions[fmt] = int(round(to_produce))
                 
             debug_msg = f"IA active (Tendance: {int(trend_ratio*100)}%)"
 
