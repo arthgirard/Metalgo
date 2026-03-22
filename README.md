@@ -48,6 +48,7 @@ The system learns from its own history. As sales are logged, the dataset grows.
     *Note: The model requires a minimum of 10 days of logged data to begin making accurate predictions.*
 
 * **Features used for training:**
+    * Day of the year
     * Day of the week
     * Hour of the day
     * Weather condition score (0=Bad to 2=Good)
