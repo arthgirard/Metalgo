@@ -53,7 +53,7 @@ def train_model():
     }
     df['weather_score'] = df['meteo_summary'].map(weather_map).fillna(1)
 
-    df_grouped = df.groupby(['weekday', 'hour', 'weather_score', 'bag_format']).size().reset_index(name='sales')
+    df_grouped = df.groupby(['date_val', 'weekday', 'hour', 'weather_score', 'bag_format']).size().reset_index(name='sales')
 
     models = {}
 
