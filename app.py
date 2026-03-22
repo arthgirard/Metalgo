@@ -217,6 +217,7 @@ def get_prediction():
         try:
             models = joblib.load('model.pkl')
             ai_day = int(now.strftime('%w')) # Sun=0
+            ai_yday = now.timetuple().tm_yday
             
             # Trend Calculation
             if mode == "LIVE" and elapsed_hours > 0.5:
@@ -224,6 +225,7 @@ def get_prediction():
                 past_hours = range(open_hour, now.hour)
                 if past_hours:
                     df_past = pd.DataFrame({
+                        'day_of_year': [ai_yday] * len(past_hours),
                         'weekday': [ai_day] * len(past_hours),
                         'hour': list(past_hours),
                         'weather_score': [weather_score] * len(past_hours)
@@ -234,7 +236,7 @@ def get_prediction():
                         if fmt in models:
                             total_p += sum(models[fmt].predict(df_past))
                             val_current_hour = models[fmt].predict(pd.DataFrame([{
-                                'weekday': ai_day, 'hour': now.hour, 'weather_score': weather_score
+                                'day_of_year': ai_yday, 'weekday': ai_day, 'hour': now.hour, 'weather_score': weather_score
                             }]))[0]
                             total_p += val_current_hour * (now.minute / 60)
                     past_pred = total_p
@@ -257,7 +259,7 @@ def get_prediction():
                 pred_future = 0
                 for h in hours_to_predict:
                     val = models[fmt].predict(pd.DataFrame([{
-                        'weekday': ai_day, 'hour': h, 'weather_score': weather_score
+                        'day_of_year': ai_yday, 'weekday': ai_day, 'hour': h, 'weather_score': weather_score
                     }]))[0]
                     
                     # Adjust current hour
@@ -335,6 +337,7 @@ def forecast_week_endpoint():
 
         ai_weekday = int(dt.strftime('%w'))
         py_weekday = dt.weekday()
+        ai_yday = dt.timetuple().tm_yday
         
         day_name = DAYS_FR[py_weekday]
         formatted_date = f"{day_name} {dt.day}"
@@ -377,6 +380,7 @@ def forecast_week_endpoint():
                     hour_range = range(open_h, close_h)
                     if hour_range:
                         df_input = pd.DataFrame({
+                            'day_of_year': [ai_yday] * len(hour_range),
                             'weekday': [ai_weekday] * len(hour_range),
                             'hour': list(hour_range),
                             'weather_score': [score_ai] * len(hour_range)
@@ -384,7 +388,8 @@ def forecast_week_endpoint():
                         try:
                             preds = models[fmt].predict(df_input)
                             total_fmt = int(sum(preds) * multiplier)
-                        except:
+                        except Exception as e:
+                            print(f"Erreur IA pour {fmt} : {e}")
                             total_fmt = 0
                             
                 day_stats["totals"][fmt] = total_fmt

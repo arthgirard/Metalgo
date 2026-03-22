@@ -16,6 +16,7 @@ def train_model():
         SELECT 
             date(timestamp) as date_val,
             strftime('%w', timestamp) as weekday,
+            strftime('%j', timestamp) as day_of_year,
             strftime('%H', timestamp) as hour,
             meteo_summary,
             detail as bag_format
@@ -43,6 +44,7 @@ def train_model():
         return
 
     # Preprocessing
+    df['day_of_year'] = df['day_of_year'].astype(int)
     df['weekday'] = df['weekday'].astype(int)
     df['hour'] = df['hour'].astype(int)
     
@@ -53,8 +55,7 @@ def train_model():
     }
     df['weather_score'] = df['meteo_summary'].map(weather_map).fillna(1)
 
-    df_grouped = df.groupby(['date_val', 'weekday', 'hour', 'weather_score', 'bag_format']).size().reset_index(name='sales')
-
+    df_grouped = df.groupby(['date_val', 'day_of_year', 'weekday', 'hour', 'weather_score', 'bag_format']).size().reset_index(name='sales')
     models = {}
 
     for fmt in FORMATS:
@@ -63,7 +64,7 @@ def train_model():
         
         if data_fmt.empty: continue
 
-        X = data_fmt[['weekday', 'hour', 'weather_score']]
+        X = data_fmt[['day_of_year', 'weekday', 'hour', 'weather_score']]
         y = data_fmt['sales']
 
         regr = RandomForestRegressor(n_estimators=100, random_state=42)
