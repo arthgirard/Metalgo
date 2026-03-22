@@ -26,13 +26,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-def weather_to_score(condition_text):
-    # Converts weather text to AI score (0=Bad, 1=Avg, 2=Good)
-    mapping = {
-        'Ensoleillé': 2, 'Nuageux': 1, 'Brouillard': 1,
-        'Pluie': 0, 'Neige': 0, 'Orages': 0
-    }
-    return mapping.get(condition_text, 1)
+def weather_to_score(factor):
+    if factor < 0.85: return 0
+    if factor > 1.1: return 2
+    return 1
 
 def is_shop_open(dt):
     day = dt.weekday() # Mon=0 ... Sun=6
@@ -162,7 +159,7 @@ def get_prediction():
     
     # --- 1. CONFIG ---
     weather_cond, weather_factor = get_current_weather()
-    weather_score = weather_to_score(weather_cond)
+    weather_score = weather_to_score(weather_factor)
 
     weekday = now.weekday() # 0=Mon
     open_hour = 10
@@ -208,6 +205,10 @@ def get_prediction():
     formats = ['250g', '1kg', '2kg']
     
     # --- 2. PREDICTION LOGIC ---
+
+    # Event Detection
+    event_name, event_factor = get_special_event(now.date())
+
     use_ai = os.path.exists('model.pkl')
     trend_ratio = 1.0 
     
@@ -232,7 +233,10 @@ def get_prediction():
                     for fmt in formats:
                         if fmt in models:
                             total_p += sum(models[fmt].predict(df_past))
-                    
+                            val_current_hour = models[fmt].predict(pd.DataFrame([{
+                                'weekday': ai_day, 'hour': now.hour, 'weather_score': weather_score
+                            }]))[0]
+                            total_p += val_current_hour * (now.minute / 60)
                     past_pred = total_p
 
                 # Global Ratio
@@ -264,7 +268,7 @@ def get_prediction():
                 
                 # Apply Trend
                 final_total = real_sales.get(fmt, 0) + (pred_future * trend_ratio)
-                to_produce = final_total - real_sales.get(fmt, 0)
+                to_produce = pred_future * trend_ratio * event_factor
                 predictions[fmt] = int(to_produce + 0.99)
                 
             debug_msg = f"IA active (Tendance: {int(trend_ratio*100)}%)"
@@ -272,9 +276,6 @@ def get_prediction():
         except Exception as e:
             print(f"AI Error: {e}")
             use_ai = False
-
-    # Event Detection
-    event_name, event_factor = get_special_event(now.date())
 
     if not use_ai:
         # === MATH MODE ===

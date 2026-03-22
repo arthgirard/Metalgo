@@ -48,8 +48,8 @@ def train_model():
     
     # Mapping must match strings from meteo.py
     weather_map = {
-        'Ensoleillé': 2, 'Nuageux': 1, 'Brouillard': 1,
-        'Pluie': 0, 'Neige': 0, 'Orages': 0, 'Inconnu': 1
+        'Ensoleillé': 2, 'Variable': 1, 'Nuageux': 1, 'Brouillard': 1,
+        'Pluie': 0, 'Averses': 0, 'Neige': 0, 'Orage': 0, 'Orages': 0, 'Inconnu': 1
     }
     df['weather_score'] = df['meteo_summary'].map(weather_map).fillna(1)
 
