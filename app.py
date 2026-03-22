@@ -239,7 +239,7 @@ def get_prediction():
                 total_current_sales = sum(real_sales.values())
                 if past_pred > 5:
                     trend_ratio = total_current_sales / past_pred
-                    trend_ratio = max(0.5, min(trend_ratio, 2.0))
+                    trend_ratio = max(0, min(trend_ratio, 5.0))
 
             # Future Prediction
             hours_to_predict = range(now.hour, close_hour) if mode == "LIVE" else range(open_hour, close_hour)
