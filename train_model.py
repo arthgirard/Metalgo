@@ -55,7 +55,32 @@ def train_model():
     }
     df['weather_score'] = df['meteo_summary'].map(weather_map).fillna(1)
 
-    df_grouped = df.groupby(['date_val', 'day_of_year', 'weekday', 'hour', 'weather_score', 'bag_format']).size().reset_index(name='sales')
+    # get daily weather median
+    daily_weather = df.groupby('date_val')['weather_score'].median().round().astype(int).reset_index()
+    daily_info = df[['date_val', 'day_of_year', 'weekday']].drop_duplicates()
+    daily_context = pd.merge(daily_info, daily_weather, on='date_val')
+
+    # create full grid of all combinations
+    valid_dates = df['date_val'].unique()
+    hours_of_operation = list(range(10, 19))
+    
+    idx = pd.MultiIndex.from_product(
+        [valid_dates, hours_of_operation, FORMATS], 
+        names=['date_val', 'hour', 'bag_format']
+    )
+    df_grid = pd.DataFrame(index=idx).reset_index()
+
+    # attach daily context
+    df_grid = pd.merge(df_grid, daily_context, on='date_val', how='left')
+
+    # calculate actual sales
+    actual_sales = df.groupby(['date_val', 'hour', 'bag_format']).size().reset_index(name='sales')
+
+    # merge and fill missing with zeros
+    df_final = pd.merge(df_grid, actual_sales, on=['date_val', 'hour', 'bag_format'], how='left')
+    df_final['sales'] = df_final['sales'].fillna(0).astype(int)
+
+    df_grouped = df_final
     models = {}
 
     for fmt in FORMATS:
