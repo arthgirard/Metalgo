@@ -62,13 +62,26 @@ def train_model():
 
     # create full grid of all combinations
     valid_dates = df['date_val'].unique()
-    hours_of_operation = list(range(10, 19))
-    
-    idx = pd.MultiIndex.from_product(
-        [valid_dates, hours_of_operation, FORMATS], 
-        names=['date_val', 'hour', 'bag_format']
-    )
-    df_grid = pd.DataFrame(index=idx).reset_index()
+
+    # Monday is closed - filter out
+    date_weekday = df[['date_val', 'weekday']].drop_duplicates().set_index('date_val')['weekday'].to_dict()
+    valid_dates = [d for d in valid_dates if date_weekday.get(d, 1) != 0]
+
+    def get_close_hour(weekday):
+        # strftime('%w'): Sun=0, Mon=1 ... Sat=6
+        if weekday in [4, 5]: return 18  # Thu, Fri
+        return 17
+
+    date_weekday_map = daily_context.set_index('date_val')['weekday'].to_dict()
+
+    rows = []
+    for d in valid_dates:
+        wday = date_weekday_map.get(d, 1)
+        close_h = get_close_hour(wday)
+        for h in range(10, close_h + 1):
+            for fmt in FORMATS:
+                rows.append({'date_val': d, 'hour': h, 'bag_format': fmt})
+    df_grid = pd.DataFrame(rows)
 
     # attach daily context
     df_grid = pd.merge(df_grid, daily_context, on='date_val', how='left')

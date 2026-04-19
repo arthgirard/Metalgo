@@ -28,7 +28,7 @@ def init_db():
 
 def weather_to_score(factor):
     if factor < 0.85: return 0
-    if factor > 1.1: return 2
+    if factor >= 1.1: return 2
     return 1
 
 def is_shop_open(dt):
@@ -248,7 +248,7 @@ def get_prediction():
                     trend_ratio = max(0, min(trend_ratio, 5.0))
 
             # Future Prediction
-            hours_to_predict = range(now.hour, close_hour) if mode == "LIVE" else range(open_hour, close_hour)
+            hours_to_predict = range(now.hour, close_hour + 1) if mode == "LIVE" else range(open_hour, close_hour + 1)
             current_min = now.minute
 
             for fmt in formats:
@@ -269,11 +269,8 @@ def get_prediction():
                     pred_future += val
                 
                 # Apply Trend
-                final_total = real_sales.get(fmt, 0) + (pred_future * trend_ratio)
-                current_trend = trend_ratio if fmt != '2kg' else min(trend_ratio, 1.1) 
-                to_produce = pred_future * current_trend * event_factor
-
-                predictions[fmt] = int(round(to_produce))
+                remaining = pred_future * trend_ratio * event_factor
+                predictions[fmt] = int(round(real_sales.get(fmt, 0) + remaining))
                 
             debug_msg = f"IA active (Tendance: {int(trend_ratio*100)}%)"
 
@@ -372,7 +369,7 @@ def forecast_week_endpoint():
             try:
                 _, weather_factor = interpret_weather_code(day_data['code'])
                 if weather_factor < 0.85: score_ai = 0
-                if weather_factor > 1.1: score_ai = 2
+                if weather_factor >= 1.1: score_ai = 2
             except NameError:
                 pass
             
