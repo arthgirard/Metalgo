@@ -6,14 +6,13 @@ import joblib
 import pandas as pd
 
 from meteo import get_current_weather, get_weekly_forecast, interpret_weather_code
-from event_service import get_special_event
+from event_service import get_special_event, get_game_info
 from train_model import train_model
 
 app = Flask(__name__)
 DB_NAME = "data.db"
 
-# --- UTILS ---
-
+# Utils
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -46,8 +45,7 @@ def is_shop_open(dt):
     
     return open_hour <= hour < close_hour
 
-# --- ROUTES ---
-
+# Routes
 @app.route('/')
 def index():
     now = datetime.now()
@@ -181,7 +179,10 @@ def get_prediction():
 
     predictions = {}
     formats = ['250g', '1kg', '2kg']
+    
+    # Event factors and NHL game status
     event_name, event_factor = get_special_event(now.date())
+    is_game, is_playoff = get_game_info(now.date())
     
     use_ai = os.path.exists('model.pkl')
     dynamic_multiplier = event_factor 
@@ -191,12 +192,17 @@ def get_prediction():
             models = joblib.load('model.pkl')
             ai_day = int(now.strftime('%w')) # 0=Sun, 6=Sat
             
-            # Live performance ratio (reality > theory)
+            # Live performance ratio (reality vs theory)
             if mode == "LIVE" and elapsed_hours > 0.5:
                 past_pred = 0
                 for h in range(open_hour, now.hour + 1):
-                    # Removed day_of_year feature
-                    df_h = pd.DataFrame([{'weekday': ai_day, 'hour': h, 'weather_score': weather_score}])
+                    df_h = pd.DataFrame([{
+                        'weekday': ai_day, 
+                        'hour': h, 
+                        'weather_score': weather_score,
+                        'is_game_day': is_game,
+                        'is_playoff_game': is_playoff
+                    }])
                     total_h = 0
                     for fmt in formats:
                         if fmt in models: total_h += models[fmt].predict(df_h)[0]
@@ -208,7 +214,6 @@ def get_prediction():
 
                 total_current_sales = sum(real_sales.values())
                 if past_pred > 2:
-                    # Encapsulates event factor naturally based on real sales pacing
                     dynamic_multiplier = total_current_sales / past_pred
                     dynamic_multiplier = max(0.5, min(dynamic_multiplier, 3.0))
 
@@ -220,7 +225,13 @@ def get_prediction():
                 
                 pred_future = 0
                 for h in range(now.hour, close_hour + 1):
-                    df_h = pd.DataFrame([{'weekday': ai_day, 'hour': h, 'weather_score': weather_score}])
+                    df_h = pd.DataFrame([{
+                        'weekday': ai_day, 
+                        'hour': h, 
+                        'weather_score': weather_score,
+                        'is_game_day': is_game,
+                        'is_playoff_game': is_playoff
+                    }])
                     val = models[fmt].predict(df_h)[0]
                     
                     if mode == "LIVE" and h == now.hour:
@@ -236,7 +247,7 @@ def get_prediction():
             debug_msg = f"Erreur IA (Fallback Simple): {str(e)}"
 
     if not use_ai:
-        # Fallback to math mode (consistent return: Total Day Target)
+        # Fallback math mode
         for fmt in formats:
             sold = real_sales.get(fmt, 0)
             if mode == "LIVE" and elapsed_hours > 0.1:
@@ -280,7 +291,11 @@ def forecast_week_endpoint():
 
         for day_data in days_to_process: 
             dt = datetime.strptime(day_data['date'], "%Y-%m-%d")
+            
+            # Fetch events and game info
             event_name, multiplier = get_special_event(dt.date())
+            is_game, is_playoff = get_game_info(dt.date())
+            
             ai_weekday = int(dt.strftime('%w'))
             py_weekday = dt.weekday()
             
@@ -295,7 +310,6 @@ def forecast_week_endpoint():
             if not day_stats["ferme"]:
                 close_h = 18 if py_weekday in [3, 4] else 17
                 
-                # Fetch actual weather score for the future day
                 try:
                     _, weather_factor = interpret_weather_code(day_data.get('code', 2))
                     score_ai = weather_to_score(weather_factor)
@@ -309,8 +323,11 @@ def forecast_week_endpoint():
                         df_input = pd.DataFrame({
                             'weekday': [ai_weekday] * len(hours),
                             'hour': list(hours),
-                            'weather_score': [score_ai] * len(hours)
+                            'weather_score': [score_ai] * len(hours),
+                            'is_game_day': [is_game] * len(hours),
+                            'is_playoff_game': [is_playoff] * len(hours)
                         })
+                        # Apply generic multiplier scaling to the AI prediction
                         total_fmt = int(sum(models[fmt].predict(df_input)) * multiplier)
                     day_stats["totals"][fmt] = total_fmt
 

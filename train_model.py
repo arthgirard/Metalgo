@@ -3,6 +3,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 import joblib
 from datetime import datetime
+from event_service import get_game_info
 
 DB_NAME = "data.db"
 FORMATS = ['250g', '1kg', '2kg']
@@ -51,14 +52,25 @@ def train_model():
     }
     df['weather_score'] = df['meteo_summary'].map(weather_map).fillna(1)
 
+    # Local cache to avoid repeated NHL API calls for the same day
+    game_info_cache = {}
+    def fetch_game_info(date_val_str):
+        if date_val_str not in game_info_cache:
+            dt = datetime.strptime(date_val_str, "%Y-%m-%d").date()
+            game_info_cache[date_val_str] = get_game_info(dt)
+        return game_info_cache[date_val_str]
+
     # Build feature grid for all hours to handle zero-sales hours
-    # Removed day_of_year to allow extrapolation for future weeks
     daily_context = df[['date_val', 'weekday', 'weather_score']].drop_duplicates('date_val')
     
     rows = []
     for _, day in daily_context.iterrows():
         # strftime %w: 0=Sun, 1=Mon...
         close_h = 18 if day['weekday'] in [4, 5] else 17
+        
+        # Fetch NHL game info for this specific day
+        is_game, is_playoff = fetch_game_info(day['date_val'])
+        
         for h in range(10, close_h + 1):
             for fmt in FORMATS:
                 rows.append({
@@ -66,7 +78,9 @@ def train_model():
                     'hour': h, 
                     'bag_format': fmt,
                     'weekday': day['weekday'],
-                    'weather_score': day['weather_score']
+                    'weather_score': day['weather_score'],
+                    'is_game_day': is_game,
+                    'is_playoff_game': is_playoff
                 })
     
     df_grid = pd.DataFrame(rows)
@@ -79,8 +93,8 @@ def train_model():
         data_fmt = df_final[df_final['bag_format'] == fmt]
         if data_fmt.empty: continue
         
-        # Reduced features to fundamental signals
-        X = data_fmt[['weekday', 'hour', 'weather_score']]
+        # Train model with new NHL features
+        X = data_fmt[['weekday', 'hour', 'weather_score', 'is_game_day', 'is_playoff_game']]
         y = data_fmt['sales']
         
         regr = RandomForestRegressor(n_estimators=100, random_state=42)
