@@ -40,9 +40,9 @@ def is_shop_open(dt):
     open_hour = 10
     close_hour = 17
     
-    if day in [1, 2]: close_hour = 17 # Tue-Wed
-    elif day in [3, 4]: close_hour = 18 # Thu-Fri
-    elif day in [5, 6]: close_hour = 17 # Sat-Sun
+    if day in [1, 2]: close_hour = 17 
+    elif day in [3, 4]: close_hour = 18 
+    elif day in [5, 6]: close_hour = 17 
     
     return open_hour <= hour < close_hour
 
@@ -72,8 +72,6 @@ def log_action():
     
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    
-    # CORRECTION ICI : On convertit datetime.now() en string explicitement
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     c.execute("INSERT INTO logs (timestamp, action_type, detail, meteo_summary) VALUES (?, ?, ?, ?)", 
@@ -106,41 +104,33 @@ def get_stats():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # 1. Sales Volumes
-    query_sales = "SELECT detail, COUNT(*) FROM logs WHERE action_type = 'VENTE' AND date(timestamp) LIKE ? GROUP BY detail"
-    c.execute(query_sales, (today + '%',))
+    query_sales = "SELECT detail, COUNT(*) FROM logs WHERE action_type = 'VENTE' AND date(timestamp) = ? GROUP BY detail"
+    c.execute(query_sales, (today,))
     sales_results = c.fetchall()
     
     stats = {"250g": 0, "1kg": 0, "2kg": 0}
     for row in sales_results:
         if row[0] in stats: stats[row[0]] = row[1]
 
-    # 2. Peak Hour
     query_hour = """
         SELECT strftime('%H', timestamp), COUNT(*) 
         FROM logs 
-        WHERE action_type = 'VENTE' AND date(timestamp) LIKE ? 
+        WHERE action_type = 'VENTE' AND date(timestamp) = ? 
         GROUP BY strftime('%H', timestamp) 
         ORDER BY COUNT(*) DESC 
         LIMIT 1
     """
-    c.execute(query_hour, (today + '%',))
+    c.execute(query_hour, (today,))
     res_hour = c.fetchone()
     peak_hour = f"{res_hour[0]}h00" if res_hour else "--"
 
-    # 3. Conversions
-    query_conv = "SELECT COUNT(*) FROM logs WHERE action_type = 'CONVERSION' AND date(timestamp) LIKE ?"
-    c.execute(query_conv, (today + '%',))
+    query_conv = "SELECT COUNT(*) FROM logs WHERE action_type = 'CONVERSION' AND date(timestamp) = ?"
+    c.execute(query_conv, (today,))
     nb_conversions = c.fetchone()[0]
 
     conn.close()
 
-    # 4. Top Format & Total Mass
-    if sum(stats.values()) > 0:
-        top_format = max(stats, key=stats.get)
-    else:
-        top_format = "--"
-
+    top_format = max(stats, key=stats.get) if sum(stats.values()) > 0 else "--"
     total_kg = (stats["250g"] * 0.25) + (stats["1kg"] * 1) + (stats["2kg"] * 2)
 
     return jsonify({
@@ -156,44 +146,32 @@ def get_stats():
 @app.route('/api/prediction')
 def get_prediction():
     now = datetime.now()
-    
-    # --- 1. CONFIG ---
     weather_cond, weather_factor = get_current_weather()
     weather_score = weather_to_score(weather_factor)
 
-    weekday = now.weekday() # 0=Mon
+    weekday = now.weekday() 
     open_hour = 10
     close_hour = 17
     
-    is_closed = False
-    if weekday == 0: is_closed = True
-    elif weekday in [3, 4]: close_hour = 18
-
-    if is_closed:
-         return jsonify({
-            "heures_restantes": 0,
-            "meteo": weather_cond,
-            "previsions": {"250g":0, "1kg":0, "2kg":0},
-            "debug_info": "Fermé le lundi",
-            "message": "Fermé"
-        })
+    if weekday == 0:
+        return jsonify({"heures_restantes": 0, "meteo": weather_cond, "previsions": {"250g":0, "1kg":0, "2kg":0}, "message": "Fermé"})
+    
+    if weekday in [3, 4]: close_hour = 18
 
     start_day = now.replace(hour=open_hour, minute=0, second=0, microsecond=0)
     end_day = now.replace(hour=close_hour, minute=0, second=0, microsecond=0)
 
+    # Time calculations
     if now < start_day:
-        # Before Open
         time_left = (end_day - start_day).total_seconds() / 3600
         elapsed_hours = 0
         mode = "PLANNING"
     else:
-        # Live
-        time_left = (end_day - now).total_seconds() / 3600
-        if time_left < 0: time_left = 0
+        time_left = max(0, (end_day - now).total_seconds() / 3600)
         elapsed_hours = (now - start_day).total_seconds() / 3600
         mode = "LIVE"
 
-    # Real Sales
+    # Current Sales
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT detail, COUNT(*) FROM logs WHERE action_type = 'VENTE' AND date(timestamp) = ? GROUP BY detail", 
@@ -203,94 +181,72 @@ def get_prediction():
 
     predictions = {}
     formats = ['250g', '1kg', '2kg']
-    
-    # --- 2. PREDICTION LOGIC ---
-
-    # Event Detection
     event_name, event_factor = get_special_event(now.date())
-
+    
     use_ai = os.path.exists('model.pkl')
-    trend_ratio = 1.0 
+    dynamic_multiplier = event_factor 
     
     if use_ai:
-        # === AI MODE ===
         try:
             models = joblib.load('model.pkl')
-            ai_day = int(now.strftime('%w')) # Sun=0
-            ai_yday = now.timetuple().tm_yday
+            ai_day = int(now.strftime('%w')) # 0=Sun, 6=Sat
             
-            # Trend Calculation
+            # Live performance ratio (reality > theory)
             if mode == "LIVE" and elapsed_hours > 0.5:
                 past_pred = 0
-                past_hours = range(open_hour, now.hour)
-                if past_hours:
-                    df_past = pd.DataFrame({
-                        'day_of_year': [ai_yday] * len(past_hours),
-                        'weekday': [ai_day] * len(past_hours),
-                        'hour': list(past_hours),
-                        'weather_score': [weather_score] * len(past_hours)
-                    })
-                    
-                    total_p = 0
+                for h in range(open_hour, now.hour + 1):
+                    # Removed day_of_year feature
+                    df_h = pd.DataFrame([{'weekday': ai_day, 'hour': h, 'weather_score': weather_score}])
+                    total_h = 0
                     for fmt in formats:
-                        if fmt in models:
-                            total_p += sum(models[fmt].predict(df_past))
-                            val_current_hour = models[fmt].predict(pd.DataFrame([{
-                                'day_of_year': ai_yday, 'weekday': ai_day, 'hour': now.hour, 'weather_score': weather_score
-                            }]))[0]
-                            total_p += val_current_hour * (now.minute / 60)
-                    past_pred = total_p
+                        if fmt in models: total_h += models[fmt].predict(df_h)[0]
+                    
+                    if h == now.hour:
+                        past_pred += total_h * (now.minute / 60)
+                    else:
+                        past_pred += total_h
 
-                # Global Ratio
                 total_current_sales = sum(real_sales.values())
-                if past_pred > 5:
-                    trend_ratio = total_current_sales / past_pred
-                    trend_ratio = max(0, min(trend_ratio, 5.0))
+                if past_pred > 2:
+                    # Encapsulates event factor naturally based on real sales pacing
+                    dynamic_multiplier = total_current_sales / past_pred
+                    dynamic_multiplier = max(0.5, min(dynamic_multiplier, 3.0))
 
-            # Future Prediction
-            hours_to_predict = range(now.hour, close_hour + 1) if mode == "LIVE" else range(open_hour, close_hour + 1)
-            current_min = now.minute
-
+            # Future Logic
             for fmt in formats:
                 if fmt not in models:
-                    predictions[fmt] = 0
+                    predictions[fmt] = real_sales.get(fmt, 0)
                     continue
                 
                 pred_future = 0
-                for h in hours_to_predict:
-                    val = models[fmt].predict(pd.DataFrame([{
-                        'day_of_year': ai_yday, 'weekday': ai_day, 'hour': h, 'weather_score': weather_score
-                    }]))[0]
+                for h in range(now.hour, close_hour + 1):
+                    df_h = pd.DataFrame([{'weekday': ai_day, 'hour': h, 'weather_score': weather_score}])
+                    val = models[fmt].predict(df_h)[0]
                     
-                    # Adjust current hour
                     if mode == "LIVE" and h == now.hour:
-                        val = val * ((60 - current_min) / 60)
+                        val = val * (max(0, 60 - now.minute) / 60)
                     
                     pred_future += val
                 
-                # Apply Trend
-                remaining = pred_future * trend_ratio * event_factor
-                predictions[fmt] = int(round(real_sales.get(fmt, 0) + remaining))
+                predictions[fmt] = int(round(real_sales.get(fmt, 0) + (pred_future * dynamic_multiplier)))
                 
-            debug_msg = f"IA active (Tendance: {int(trend_ratio*100)}%)"
-
+            debug_msg = f"IA active (Tendance: {int(dynamic_multiplier*100)}%)"
         except Exception as e:
-            print(f"AI Error: {e}")
             use_ai = False
+            debug_msg = f"Erreur IA (Fallback Simple): {str(e)}"
 
     if not use_ai:
-        # === MATH MODE ===
+        # Fallback to math mode (consistent return: Total Day Target)
         for fmt in formats:
             sold = real_sales.get(fmt, 0)
-            
             if mode == "LIVE" and elapsed_hours > 0.1:
                 speed = sold / elapsed_hours
-                remaining_work = (speed * time_left) * weather_factor * event_factor
-                predictions[fmt] = int(remaining_work + 0.99)
+                remaining = (speed * time_left) * weather_factor * event_factor
+                predictions[fmt] = int(round(sold + remaining))
             else:
-                predictions[fmt] = 0 
-        
-        debug_msg = "Mode Simple (Pas d'IA)"
+                predictions[fmt] = sold
+        if not use_ai and "Erreur IA" not in debug_msg:
+            debug_msg = "Mode Simple (IA inactive)"
 
     return jsonify({
         "heures_restantes": round(time_left, 1),
@@ -304,7 +260,7 @@ def get_prediction():
 def retrain_endpoint():
     try:
         train_model()
-        return jsonify({"status": "success", "message": "Modèle réentraîné avec succès !"})
+        return jsonify({"status": "success", "message": "Modèle réentraîné"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -315,87 +271,53 @@ def forecast_week_endpoint():
 
     try:
         models = joblib.load('model.pkl')
-    except Exception as e:
-        return jsonify({"error": f"Model load error: {str(e)}"})
+        weather_forecast = get_weekly_forecast()
+        weekly_results = []
+        formats = ['250g', '1kg', '2kg']
+        DAYS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 
-    weather_forecast = get_weekly_forecast()
-    
-    weekly_results = []
-    formats = ['250g', '1kg', '2kg']
-    
-    DAYS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+        days_to_process = weather_forecast[1:8] if len(weather_forecast) > 1 else []
 
-    # Days 1 to 7
-    days_to_process = weather_forecast[1:8] if len(weather_forecast) > 1 else []
-
-    for day_data in days_to_process: 
-        date_str = day_data['date']
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        
-        event_name, multiplier = get_special_event(dt.date())
-
-        ai_weekday = int(dt.strftime('%w'))
-        py_weekday = dt.weekday()
-        ai_yday = dt.timetuple().tm_yday
-        
-        day_name = DAYS_FR[py_weekday]
-        formatted_date = f"{day_name} {dt.day}"
-
-        if py_weekday == 0:
-            open_h, close_h = 0, 0
-            is_closed = True
-        elif py_weekday in [1, 2]:
-            open_h, close_h = 10, 17
-            is_closed = False
-        elif py_weekday in [3, 4]:
-            open_h, close_h = 10, 18
-            is_closed = False
-        else:
-            open_h, close_h = 10, 17
-            is_closed = False
-
-        day_stats = {
-            "date": date_str, 
-            "date_affichee": formatted_date,
-            "meteo": day_data['description'], 
-            "totals": {},
-            "ferme": is_closed,
-            "event": event_name,
-            "multiplier": multiplier
-        }
-        
-        if not is_closed:
-            score_ai = 1
-            try:
-                _, weather_factor = interpret_weather_code(day_data['code'])
-                if weather_factor < 0.85: score_ai = 0
-                if weather_factor >= 1.1: score_ai = 2
-            except NameError:
-                pass
+        for day_data in days_to_process: 
+            dt = datetime.strptime(day_data['date'], "%Y-%m-%d")
+            event_name, multiplier = get_special_event(dt.date())
+            ai_weekday = int(dt.strftime('%w'))
+            py_weekday = dt.weekday()
             
-            for fmt in formats:
-                total_fmt = 0
-                if fmt in models:
-                    hour_range = range(open_h, close_h)
-                    if hour_range:
+            day_stats = {
+                "date_affichee": f"{DAYS_FR[py_weekday]} {dt.day}",
+                "meteo": day_data['description'], 
+                "totals": {},
+                "ferme": py_weekday == 0,
+                "event": event_name
+            }
+            
+            if not day_stats["ferme"]:
+                close_h = 18 if py_weekday in [3, 4] else 17
+                
+                # Fetch actual weather score for the future day
+                try:
+                    _, weather_factor = interpret_weather_code(day_data.get('code', 2))
+                    score_ai = weather_to_score(weather_factor)
+                except Exception:
+                    score_ai = 1 
+                
+                for fmt in formats:
+                    total_fmt = 0
+                    if fmt in models:
+                        hours = range(10, close_h + 1)
                         df_input = pd.DataFrame({
-                            'day_of_year': [ai_yday] * len(hour_range),
-                            'weekday': [ai_weekday] * len(hour_range),
-                            'hour': list(hour_range),
-                            'weather_score': [score_ai] * len(hour_range)
+                            'weekday': [ai_weekday] * len(hours),
+                            'hour': list(hours),
+                            'weather_score': [score_ai] * len(hours)
                         })
-                        try:
-                            preds = models[fmt].predict(df_input)
-                            total_fmt = int(sum(preds) * multiplier)
-                        except Exception as e:
-                            print(f"Erreur IA pour {fmt} : {e}")
-                            total_fmt = 0
-                            
-                day_stats["totals"][fmt] = total_fmt
+                        total_fmt = int(sum(models[fmt].predict(df_input)) * multiplier)
+                    day_stats["totals"][fmt] = total_fmt
 
-        weekly_results.append(day_stats)
-        
-    return jsonify(weekly_results)
+            weekly_results.append(day_stats)
+        return jsonify(weekly_results)
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route('/api/history')
 def get_history():
@@ -408,14 +330,7 @@ def get_history():
     history = []
     for row in rows:
         dt = datetime.strptime(row[2].split('.')[0], "%Y-%m-%d %H:%M:%S")
-        time_fmt = dt.strftime("%H:%M")
-        
-        history.append({
-            "type": row[0],
-            "detail": row[1],
-            "heure": time_fmt
-        })
-    
+        history.append({"type": row[0], "detail": row[1], "heure": dt.strftime("%H:%M")})
     return jsonify(history)
 
 if __name__ == '__main__':

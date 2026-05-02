@@ -53,11 +53,17 @@ def get_current_weather():
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&current=weather_code&timezone=America%2FNew_York"
         response = requests.get(url, timeout=10) 
-        data = response.json()
         
+        # Guard against non-200 responses (e.g., 429 Rate Limit, 503 Service Unavailable)
+        response.raise_for_status()
+        
+        data = response.json()
         code = data['current']['weather_code']
         return interpret_weather_code(code)
         
+    except requests.exceptions.JSONDecodeError:
+        print("Error in Weather Module (Current): API returned non-JSON response (possible rate limit or downtime).")
+        return "Indisponible", 1.0
     except Exception as e:
         print(f"Error in Weather Module (Current): {e}")
         return "Indisponible", 1.0
@@ -69,6 +75,10 @@ def get_weekly_forecast():
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&daily=weather_code&timezone=America%2FNew_York&forecast_days=8"
         response = requests.get(url, timeout=5)
+        
+        # Guard against non-200 responses
+        response.raise_for_status()
+        
         data = response.json()
         
         results = []
@@ -88,6 +98,9 @@ def get_weekly_forecast():
             
         return results
         
+    except requests.exceptions.JSONDecodeError:
+        print("Error in Weather Module (Forecast): API returned non-JSON response.")
+        return []
     except Exception as e:
         print(f"Error in Weather Module (Forecast): {e}")
         return []
