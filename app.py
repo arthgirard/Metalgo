@@ -185,46 +185,54 @@ def get_prediction():
     is_game, is_playoff = get_game_info(now.date())
     
     use_ai = os.path.exists('model.pkl')
-    dynamic_multiplier = event_factor 
+    # Initialize debug_msg so fallback path never hits a NameError
+    debug_msg = "Mode Simple (IA inactive)"
     
     if use_ai:
         try:
             models = joblib.load('model.pkl')
             ai_day = int(now.strftime('%w')) # 0=Sun, 6=Sat
-            
-            # Live performance ratio (reality vs theory)
-            if mode == "LIVE" and elapsed_hours > 0.5:
-                past_pred = 0
-                for h in range(open_hour, now.hour + 1):
-                    df_h = pd.DataFrame([{
-                        'weekday': ai_day, 
-                        'hour': h, 
-                        'weather_score': weather_score,
-                        'is_game_day': is_game,
-                        'is_playoff_game': is_playoff
-                    }])
-                    total_h = 0
-                    for fmt in formats:
-                        if fmt in models: total_h += models[fmt].predict(df_h)[0]
-                    
-                    if h == now.hour:
-                        past_pred += total_h * (now.minute / 60)
-                    else:
-                        past_pred += total_h
 
-                total_current_sales = sum(real_sales.values())
-                if past_pred > 2:
-                    dynamic_multiplier = total_current_sales / past_pred
-                    dynamic_multiplier = max(0.5, min(dynamic_multiplier, 3.0))
+            # Per-format performance ratios; default to event_factor until LIVE data is reliable
+            fmt_multipliers = {fmt: event_factor for fmt in formats}
+
+            # Live performance ratio (reality vs theory), computed per format
+            if mode == "LIVE" and elapsed_hours > 0.5:
+                for fmt in formats:
+                    if fmt not in models:
+                        continue
+                    past_pred_fmt = 0
+                    for h in range(open_hour, now.hour + 1):
+                        df_h = pd.DataFrame([{
+                            'weekday': ai_day,
+                            'hour': h,
+                            'weather_score': weather_score,
+                            'is_game_day': is_game,
+                            'is_playoff_game': is_playoff
+                        }])
+                        val = models[fmt].predict(df_h)[0]
+                        if h == now.hour:
+                            past_pred_fmt += val * (now.minute / 60)
+                        else:
+                            past_pred_fmt += val
+
+                    if past_pred_fmt > 1:
+                        m = real_sales.get(fmt, 0) / past_pred_fmt
+                        # Cap at 2.0: avoids runaway inflation from early-morning spikes
+                        fmt_multipliers[fmt] = max(0.5, min(m, 2.0))
 
             # Future Logic
+            # PLANNING: always predict the full day from open_hour, not from now.hour.
+            # Using now.hour before open causes the model to extrapolate on hours it
+            # was never trained on, inflating predictions by 1-4 phantom peak-hour values.
+            start_h = open_hour if mode == "PLANNING" else now.hour
             for fmt in formats:
                 if fmt not in models:
                     predictions[fmt] = real_sales.get(fmt, 0)
                     continue
                 
                 pred_future = 0
-                for h in range(now.hour, close_hour + 1):
+                for h in range(start_h, close_hour + 1):
                     df_h = pd.DataFrame([{
                         'weekday': ai_day, 
                         'hour': h, 
@@ -239,9 +247,10 @@ def get_prediction():
                     
                     pred_future += val
                 
-                predictions[fmt] = int(round(real_sales.get(fmt, 0) + (pred_future * dynamic_multiplier)))
-                
-            debug_msg = f"IA active (Tendance: {int(dynamic_multiplier*100)}%)"
+                predictions[fmt] = int(round(real_sales.get(fmt, 0) + (pred_future * fmt_multipliers[fmt])))
+
+            avg_multiplier = sum(fmt_multipliers.values()) / len(fmt_multipliers)
+            debug_msg = f"IA active (Tendance: {int(avg_multiplier*100)}%)"
         except Exception as e:
             use_ai = False
             debug_msg = f"Erreur IA (Fallback Simple): {str(e)}"
@@ -256,8 +265,6 @@ def get_prediction():
                 predictions[fmt] = int(round(sold + remaining))
             else:
                 predictions[fmt] = sold
-        if not use_ai and "Erreur IA" not in debug_msg:
-            debug_msg = "Mode Simple (IA inactive)"
 
     return jsonify({
         "heures_restantes": round(time_left, 1),
