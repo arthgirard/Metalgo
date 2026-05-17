@@ -176,6 +176,20 @@ def log_action():
 
     conn    = sqlite3.connect(DB_NAME)
     c       = conn.cursor()
+
+    if condition == "Indisponible":
+        # Reuse the weather from the most recent log entry of today rather than
+        # writing "Indisponible" on every failed fetch.  Fall back to
+        # "Indisponible" only when there is no prior entry yet (start of day).
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        c.execute(
+            "SELECT meteo_summary FROM logs WHERE date(timestamp) = ? ORDER BY id DESC LIMIT 1",
+            (today_str,)
+        )
+        row = c.fetchone()
+        if row and row[0] and row[0] != "Indisponible":
+            condition = row[0]
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute(
         "INSERT INTO logs (timestamp, action_type, detail, meteo_summary) VALUES (?, ?, ?, ?)",
