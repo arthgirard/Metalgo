@@ -24,20 +24,6 @@ The application combines real-time sales logging with machine learning to provid
 * **Frontend:** HTML5, CSS3, Vanilla JavaScript
 * **APIs:** Open-Meteo (Weather data)
 
-## ⚙️ Installation & Setup
-
-1.  **Clone the repository**
-    git clone https://github.com/yourusername/metalgo.git
-    cd metalgo
-
-2.  **Install dependencies**
-    pip install -r requirements.txt
-
-3.  **Run the Application**
-    python app.py
-    ### The database is initialized automatically on first run.
-    ### Access at http://localhost:5000
-
 ## 🧠 Machine Learning Model
 
 The system learns from its own history. As sales are logged, the dataset grows.
