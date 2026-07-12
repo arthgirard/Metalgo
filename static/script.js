@@ -5,6 +5,13 @@ let salesChart = null;
 document.addEventListener('DOMContentLoaded', () => {
     updateStats();
     updateHistory();
+
+    // automatic data update
+    setInterval(() => {
+        updateStats();
+        updateHistory();
+    }, 3000);
+
     setInterval(checkOpenStatus, 60000); 
 });
 
