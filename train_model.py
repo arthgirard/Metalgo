@@ -3,22 +3,29 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 import joblib
 from datetime import datetime
-from event_service import get_game_info
+from event_service import get_game_info, get_event_key
 
 DB_NAME = "data.db"
 FORMATS = ['250g', '1kg', '2kg']
-MIN_LOGS_THRESHOLD = 10 
+MIN_LOGS_THRESHOLD = 10
+
+# Single source of truth for the model's feature set/order. Imported by
+# app.py so every predict() call builds its DataFrame with exactly these
+# columns in exactly this order — sklearn doesn't reliably realign columns
+# by name for you, so training and inference must agree explicitly.
+FEATURE_COLUMNS = ['weekday', 'hour', 'weather_score', 'is_game_day', 'is_playoff_game', 'temperature', 'is_special_event']
 
 def train_model():
     print(">>> Training model...")
     conn = sqlite3.connect(DB_NAME)
-    
+
     query = """
         SELECT 
             date(timestamp) as date_val,
             strftime('%w', timestamp) as weekday,
             strftime('%H', timestamp) as hour,
             meteo_summary,
+            temperature,
             detail as bag_format
         FROM logs 
         WHERE action_type = 'VENTE'
@@ -45,32 +52,44 @@ def train_model():
 
     df['weekday'] = df['weekday'].astype(int)
     df['hour'] = df['hour'].astype(int)
-    
+
     weather_map = {
         'Ensoleillé': 2, 'Variable': 1, 'Nuageux': 1, 'Brouillard': 1,
         'Pluie': 0, 'Averses': 0, 'Neige': 0, 'Orage': 0, 'Orages': 0, 'Inconnu': 1
     }
     df['weather_score'] = df['meteo_summary'].map(weather_map).fillna(1)
 
-    # Local cache to avoid repeated NHL API calls for the same day
+    # `temperature` is a newer column — rows logged before it existed have
+    # NULL here. Rather than dropping that history (or crashing on NaN),
+    # impute with the median of whatever real readings exist so far, so old
+    # days stay usable and just look "temperature unknown/average" to the
+    # model instead of being discarded. As more real readings accumulate,
+    # the model gains genuine signal on temperature's effect.
+    median_temp = df['temperature'].median()
+    fallback_temp = median_temp if pd.notna(median_temp) else 15.0
+    df['temperature'] = df['temperature'].fillna(fallback_temp)
+
+    # Local cache to avoid repeated NHL & Event API calls for the same day
     game_info_cache = {}
-    def fetch_game_info(date_val_str):
+    event_cache = {}
+    def fetch_day_info(date_val_str):
         if date_val_str not in game_info_cache:
             dt = datetime.strptime(date_val_str, "%Y-%m-%d").date()
             game_info_cache[date_val_str] = get_game_info(dt)
-        return game_info_cache[date_val_str]
+            event_cache[date_val_str] = 1 if get_event_key(dt) else 0
+        return game_info_cache[date_val_str], event_cache[date_val_str]
 
     # Build feature grid for all hours to handle zero-sales hours
-    daily_context = df[['date_val', 'weekday', 'weather_score']].drop_duplicates('date_val')
-    
+    daily_context = df[['date_val', 'weekday', 'weather_score', 'temperature']].drop_duplicates('date_val')
+
     rows = []
     for _, day in daily_context.iterrows():
         # strftime %w: 0=Sun, 1=Mon...
         close_h = 18 if day['weekday'] in [4, 5] else 17
-        
-        # Fetch NHL game info for this specific day
-        is_game, is_playoff = fetch_game_info(day['date_val'])
-        
+
+        # Fetch NHL game info and special event status for this specific day
+        (is_game, is_playoff), is_special = fetch_day_info(day['date_val'])
+
         for h in range(10, close_h + 1):
             for fmt in FORMATS:
                 rows.append({
@@ -79,10 +98,12 @@ def train_model():
                     'bag_format': fmt,
                     'weekday': day['weekday'],
                     'weather_score': day['weather_score'],
+                    'temperature': day['temperature'],
                     'is_game_day': is_game,
-                    'is_playoff_game': is_playoff
+                    'is_playoff_game': is_playoff,
+                    'is_special_event': is_special
                 })
-    
+
     df_grid = pd.DataFrame(rows)
     actual_sales = df.groupby(['date_val', 'hour', 'bag_format']).size().reset_index(name='sales')
     df_final = pd.merge(df_grid, actual_sales, on=['date_val', 'hour', 'bag_format'], how='left')
@@ -92,11 +113,10 @@ def train_model():
     for fmt in FORMATS:
         data_fmt = df_final[df_final['bag_format'] == fmt]
         if data_fmt.empty: continue
-        
-        # Train model with new NHL features
-        X = data_fmt[['weekday', 'hour', 'weather_score', 'is_game_day', 'is_playoff_game']]
+
+        X = data_fmt[FEATURE_COLUMNS]
         y = data_fmt['sales']
-        
+
         regr = RandomForestRegressor(n_estimators=100, random_state=42)
         regr.fit(X, y)
         models[fmt] = regr
