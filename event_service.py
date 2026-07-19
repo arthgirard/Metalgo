@@ -9,20 +9,16 @@ qc_holidays = holidays.CA(subdiv='QC', language='fr')
 
 # ---------------------------------------------------------------------------
 # Static event definitions
-#
-# These are the *prior* (default) multipliers used when not enough historical
-# data has accumulated. As real sales data builds up, learned multipliers
-# progressively take over via Bayesian blending (see _get_learned_multiplier).
 # ---------------------------------------------------------------------------
 
 # Fixed calendar dates: (month, day) → (display_name, default_multiplier)
 FIXED_EVENTS = {
     (2, 14):  ("💖 St-Valentin",       1.4),
-    (6, 24):  ("⚜️ St-Jean-Baptiste",  1.5),
+    (6, 24):  ("⚜️ St-Jean-Baptiste",  2.0),
     (7, 1):   ("🇨🇦 Fête du Canada",   1.3),
     (10, 31): ("🎃 Halloween",          1.3),
-    (12, 24): ("🎄 Veille de Noël",    2.0),
-    (12, 31): ("🎉 Sylvestre",          1.8),
+    (12, 24): ("🎄 Veille de Noël",    1.2),
+    (12, 31): ("🎉 Sylvestre",          1.5),
 }
 
 # Default NHL multipliers, used as priors before data is available.
@@ -33,15 +29,6 @@ NHL_DEFAULT_MULTIPLIERS = {
 
 # ---------------------------------------------------------------------------
 # Bayesian smoothing factor
-#
-# Controls how quickly the model trusts observed data over the hardcoded prior.
-# Represents the number of "virtual" prior observations the default is worth.
-#
-#   weight = n_observed / (n_observed + SMOOTHING_FACTOR)
-#
-#   n=0  → 0%  learned, 100% default  (no data yet)
-#   n=3  → 50% learned, 50%  default  (moderate confidence)
-#   n=10 → 77% learned, 23%  default  (high confidence)
 # ---------------------------------------------------------------------------
 SMOOTHING_FACTOR = 3
 
@@ -139,24 +126,6 @@ def _get_learned_multiplier(event_key, default_multiplier, db_path, is_nhl_key=F
     """
     Queries the daily_snapshots table to derive a data-driven sales multiplier
     for the given event_key, then blends it with the hardcoded default prior.
-
-    For non-NHL events:  compares event days vs. non-event/non-game days on the
-                         same weekday(s).
-    For NHL keys:        compares game days (filtered by playoff flag) vs.
-                         non-game days on the same weekday(s).
-
-    The blend weight grows with the number of observed event occurrences, so
-    the system naturally transitions from pure assumption to data-driven
-    predictions as history accumulates.
-
-    Args:
-        event_key (str):         Canonical event key or "nhl_regular"/"nhl_playoff".
-        default_multiplier (float): Prior multiplier to fall back to.
-        db_path (str):           Path to the SQLite database.
-        is_nhl_key (bool):       True when querying for an NHL game key.
-
-    Returns:
-        float: Blended multiplier, or default_multiplier on any error / insufficient data.
     """
     try:
         conn = sqlite3.connect(db_path)
@@ -229,20 +198,28 @@ def get_special_event(date_obj, db_path=None):
     """
     Returns the special event context for date_obj.
 
-    When db_path is provided, multipliers are learned from accumulated sales
-    history (see _get_learned_multiplier) and blended with the hardcoded
-    defaults. When db_path is omitted, only defaults are used — suitable for
-    snapshotting past days without recursion.
-
     Args:
         date_obj:        A datetime.date instance.
         db_path (str):   Path to the SQLite DB; None disables learned logic.
 
     Returns:
-        (event_name: str | None, multiplier: float)
+        (event_name: str | None, base_multiplier: float, nhl_multiplier: float)
+
+        base_multiplier reflects ONLY calendar/holiday events (Valentine's,
+        Halloween, Québec public holidays, etc). nhl_multiplier reflects the
+        Canadiens game/playoff boost on its own, or 1.0 if there's no game.
+
+        These are returned SEPARATELY on purpose: the RandomForest model is
+        trained with is_game_day / is_playoff_game as features, so it has
+        already learned the NHL effect from history. Callers feeding a
+        prediction into that model should use base_multiplier alone —
+        multiplying nhl_multiplier back in double-counts the game-day boost.
+        Only combine them (base_multiplier * nhl_multiplier) for a caller
+        that is NOT going through the ML model and has no other way of
+        knowing today is a game day (e.g. a naive linear fallback).
     """
     event_name = None
-    multiplier = 1.0
+    base_multiplier = 1.0
     event_key  = get_event_key(date_obj)
 
     # --- Non-NHL event ---
@@ -263,29 +240,26 @@ def get_special_event(date_obj, db_path=None):
         else:
             event_name, default_mult = "🎉 Événement", 1.0
 
-        multiplier = (
+        base_multiplier = (
             _get_learned_multiplier(event_key, default_mult, db_path)
             if db_path else default_mult
         )
 
-    # --- NHL game overlay ---
+    # --- NHL game overlay (kept separate from base_multiplier — see docstring) ---
+    nhl_multiplier = 1.0
     is_game, is_playoff = get_game_info(date_obj)
     if is_game:
         nhl_key      = "nhl_playoff" if is_playoff else "nhl_regular"
         nhl_default  = NHL_DEFAULT_MULTIPLIERS[nhl_key]
         nhl_label    = "🏒 Match du CH (Séries)" if is_playoff else "🏒 Match du CH"
 
-        nhl_mult = (
+        nhl_multiplier = (
             _get_learned_multiplier(nhl_key, nhl_default, db_path, is_nhl_key=True)
             if db_path else nhl_default
         )
 
-        if event_name:
-            # Stack both events: combine names and multiply their effects
-            event_name = f"{event_name} + {nhl_label}"
-            multiplier *= nhl_mult
-        else:
-            event_name = nhl_label
-            multiplier = nhl_mult
+        # Name stacking is purely cosmetic (for UI display) and independent
+        # of how the two multipliers get combined numerically by the caller.
+        event_name = f"{event_name} + {nhl_label}" if event_name else nhl_label
 
-    return event_name, multiplier
+    return event_name, base_multiplier, nhl_multiplier
