@@ -79,8 +79,18 @@ def train_model():
             event_cache[date_val_str] = 1 if get_event_key(dt) else 0
         return game_info_cache[date_val_str], event_cache[date_val_str]
 
-    # Build feature grid for all hours to handle zero-sales hours
-    daily_context = df[['date_val', 'weekday', 'weather_score', 'temperature']].drop_duplicates('date_val')
+    # Build feature grid for all hours to handle zero-sales hours.
+    # weather_score/temperature are averaged over every sale logged that
+    # day (mean for temperature, mode for the weather score) instead of
+    # just keeping whichever sale was logged first. A single early sale is
+    # not representative of the whole day, and training on it was the
+    # reason the weekly forecast (which uses a real day-level forecast
+    # value) disagreed so much with same-day predictions.
+    daily_context = df.groupby('date_val').agg(
+        weekday=('weekday', 'first'),
+        temperature=('temperature', 'mean'),
+        weather_score=('weather_score', lambda s: s.mode().iloc[0]),
+    ).reset_index()
 
     rows = []
     for _, day in daily_context.iterrows():
@@ -90,7 +100,10 @@ def train_model():
         # Fetch NHL game info and special event status for this specific day
         (is_game, is_playoff), is_special = fetch_day_info(day['date_val'])
 
-        for h in range(10, close_h + 1):
+        # close_h is the closing hour, not itself a selling hour (e.g.
+        # close_h=17 means the last selling hour is 16h-17h), so the range
+        # stops before it. Must match is_shop_open/get_prediction in app.py.
+        for h in range(10, close_h):
             for fmt in FORMATS:
                 rows.append({
                     'date_val': day['date_val'], 
