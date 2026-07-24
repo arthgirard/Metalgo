@@ -57,15 +57,19 @@ def get_current_weather():
         return "Indisponible", 1.0, _weather_cache["temperature"]
 
 def get_weekly_forecast():
-    # Fetches weather codes and max temperature for the next 8 days
+    # Fetches weather codes and mean temperature for the next 8 days.
+    # Mean, not max: the model is trained on the average of each day's
+    # actual logged temperatures (see train_model.py), not its peak, so
+    # feeding it the day's max here would be a value it never saw an
+    # equivalent of during training.
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&daily=weather_code,temperature_2m_max&timezone=America%2FNew_York&forecast_days=8"
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&daily=weather_code,temperature_2m_mean&timezone=America%2FNew_York&forecast_days=8"
         response = requests.get(url, timeout=5)
         response.raise_for_status()
 
         daily = response.json().get('daily', {})
         codes = daily.get('weather_code', [])
-        temps = daily.get('temperature_2m_max', [])
+        temps = daily.get('temperature_2m_mean', [])
         return [
             {
                 "date": d,
