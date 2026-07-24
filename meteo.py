@@ -1,5 +1,7 @@
 import requests
 import time
+from datetime import datetime
+from collections import Counter
 
 LAT = 45.183
 LON = -73.417
@@ -57,28 +59,49 @@ def get_current_weather():
         return "Indisponible", 1.0, _weather_cache["temperature"]
 
 def get_weekly_forecast():
-    # Fetches weather codes and mean temperature for the next 8 days.
-    # Mean, not max: the model is trained on the average of each day's
-    # actual logged temperatures (see train_model.py), not its peak, so
-    # feeding it the day's max here would be a value it never saw an
-    # equivalent of during training.
+    # Fetches hourly weather codes and temperatures for the next 8 days,
+    # but strictly filters for business hours (10:00 to 17:00)
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&daily=weather_code,temperature_2m_mean&timezone=America%2FNew_York&forecast_days=8"
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&hourly=weather_code,temperature_2m&timezone=America%2FNew_York&forecast_days=8"
         response = requests.get(url, timeout=5)
         response.raise_for_status()
 
-        daily = response.json().get('daily', {})
-        codes = daily.get('weather_code', [])
-        temps = daily.get('temperature_2m_mean', [])
-        return [
-            {
-                "date": d,
-                "code": c,
-                "description": interpret_weather_code(c)[0],
-                "temperature": (temps[i] if i < len(temps) else None),
-            }
-            for i, (d, c) in enumerate(zip(daily.get('time', []), codes))
-        ]
+        hourly = response.json().get('hourly', {})
+        times = hourly.get('time', [])
+        codes = hourly.get('weather_code', [])
+        temps = hourly.get('temperature_2m', [])
+
+        # Group data by day, keeping only hours between 10:00 and 17:00
+        daily_business_data = {}
+        for t, c, temp in zip(times, codes, temps):
+            dt = datetime.fromisoformat(t)
+            date_str = dt.strftime('%Y-%m-%d')
+            
+            if 10 <= dt.hour <= 17:
+                if date_str not in daily_business_data:
+                    daily_business_data[date_str] = {'codes': [], 'temps': []}
+                daily_business_data[date_str]['codes'].append(c)
+                daily_business_data[date_str]['temps'].append(temp)
+
+        forecast = []
+        for date_str, data in daily_business_data.items():
+            if not data['codes']:
+                continue
+            
+            # Find the most common weather code during business hours (the mode)
+            most_common_code = Counter(data['codes']).most_common(1)[0][0]
+            # Calculate the mean temperature during business hours
+            mean_temp = sum(data['temps']) / len(data['temps'])
+
+            forecast.append({
+                "date": date_str,
+                "code": most_common_code,
+                "description": interpret_weather_code(most_common_code)[0],
+                "temperature": round(mean_temp, 1)
+            })
+
+        return forecast
+
     except Exception as e:
         print(f"Forecast API Error: {e}")
         return []
