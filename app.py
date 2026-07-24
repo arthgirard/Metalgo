@@ -16,8 +16,9 @@ DB_NAME = "data.db"
 
 # "Virtual" prior sales the intraday correction ratio must out-weigh before it's
 # trusted (same smoothing idea as SMOOTHING_FACTOR in event_service.py).
-# With 1-2 early sales the correction stays close to a no-op; it only takes
-# over once there's real signal behind it.
+# Also scaled by how much of the day has elapsed in get_prediction, so a
+# popular format can't earn high confidence just from raw predicted volume
+# in the first hour — see the time_fraction comment there.
 CORRECTION_SMOOTHING = 3.0
 
 # Nightly retrain time (24h). Chosen well after closing and well before
@@ -172,6 +173,7 @@ def get_prediction():
     start_day, end_day = now.replace(hour=open_hour, minute=0, second=0, microsecond=0), now.replace(hour=close_hour, minute=0, second=0, microsecond=0)
     mode, time_left = ("PLANNING", (end_day - start_day).total_seconds() / 3600) if now < start_day else ("LIVE", max(0, (end_day - now).total_seconds() / 3600))
     elapsed_hours = 0 if mode == "PLANNING" else (now - start_day).total_seconds() / 3600
+    business_hours = max(close_hour - open_hour, 1)
 
     with sqlite3.connect(DB_NAME) as conn:
         real_sales = dict(conn.execute("SELECT detail, COUNT(*) FROM logs WHERE action_type = 'VENTE' AND date(timestamp) = ? GROUP BY detail", (now.strftime("%Y-%m-%d"),)).fetchall())
@@ -188,6 +190,14 @@ def get_prediction():
             # We initialize multiplier adjustments internally for scaling via empirical live adjustments.
             ai_day, fmt_multipliers = int(now.strftime('%w')), {fmt: 1.0 for fmt in formats}
             if mode == "LIVE":
+                # Fraction of the business day elapsed so far. A popular
+                # format's predicted volume for just the first hour can
+                # already be large, which used to make confidence (below)
+                # jump to a high value almost immediately and let one busy
+                # or slow opening stretch swing the whole remaining day's
+                # forecast. Multiplying by time_fraction forces confidence
+                # to build up gradually over the day regardless of format.
+                time_fraction = min(elapsed_hours / business_hours, 1.0)
                 for fmt in formats:
                     if fmt not in models: continue
                     past_rows = [{'weekday': ai_day, 'hour': h, 'weather_score': weather_to_score(weather_factor), 'is_game_day': is_game, 'is_playoff_game': is_playoff, 'temperature': temp_for_model, 'is_special_event': is_special} for h in range(open_hour, now.hour + 1)]
@@ -196,7 +206,7 @@ def get_prediction():
                     if past_pred > 0.1:
                         # Blend the empirical ratio into the prior instead of replacing it outright.
                         empirical_ratio = max(0.3, min(real_sales.get(fmt, 0) / past_pred, 3.0))
-                        confidence = past_pred / (past_pred + CORRECTION_SMOOTHING)
+                        confidence = time_fraction * (past_pred / (past_pred + CORRECTION_SMOOTHING))
                         blended_ratio = confidence * empirical_ratio + (1 - confidence) * 1.0
                         fmt_multipliers[fmt] = max(0.5, min(fmt_multipliers[fmt] * blended_ratio, 3.0))
 
@@ -206,8 +216,8 @@ def get_prediction():
                 if fmt not in models:
                     predictions[fmt] = predictions_low[fmt] = predictions_high[fmt] = sold
                     continue
-                future_rows = [{'weekday': ai_day, 'hour': h, 'weather_score': weather_to_score(weather_factor), 'is_game_day': is_game, 'is_playoff_game': is_playoff, 'temperature': temp_for_model, 'is_special_event': is_special} for h in range(start_h, close_hour + 1)]
-                future_weights = [(max(0, 60 - now.minute) / 60 if mode == "LIVE" and h == now.hour else 1) for h in range(start_h, close_hour + 1)]
+                future_rows = [{'weekday': ai_day, 'hour': h, 'weather_score': weather_to_score(weather_factor), 'is_game_day': is_game, 'is_playoff_game': is_playoff, 'temperature': temp_for_model, 'is_special_event': is_special} for h in range(start_h, close_hour)]
+                future_weights = [(max(0, 60 - now.minute) / 60 if mode == "LIVE" and h == now.hour else 1) for h in range(start_h, close_hour)]
                 point, low, high = _predict_with_range(models[fmt], future_rows, future_weights)
                 predictions[fmt] = int(round(sold + point * fmt_multipliers[fmt]))
                 predictions_low[fmt] = int(round(sold + low * fmt_multipliers[fmt]))
@@ -251,13 +261,16 @@ def forecast_week_endpoint():
             event_name, _, _ = get_special_event(dt.date(), db_path=DB_NAME)
             is_game, is_playoff = get_game_info(dt.date())
             is_special = 1 if get_event_key(dt.date()) else 0
+            # day_data['temperature'] is the forecasted daily mean (see
+            # meteo.py), matching the day-level mean the model is trained on.
             day_temp = day_data.get('temperature')
             day_temp = day_temp if day_temp is not None else FALLBACK_TEMPERATURE
             day_stats = {"date_affichee": f"{['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'][dt.weekday()]} {dt.day}", "meteo": day_data['description'], "temperature": day_data.get('temperature'), "totals": {}, "ferme": dt.weekday() == 0, "event": event_name}
             if not day_stats["ferme"]:
                 try: score_ai = weather_to_score(interpret_weather_code(day_data.get('code', 2))[1])
                 except Exception: score_ai = 1
-                hours = range(10, (18 if dt.weekday() in [3, 4] else 17) + 1)
+                close_day = 18 if dt.weekday() in [3, 4] else 17
+                hours = range(10, close_day)  # close_day itself is not a selling hour
                 df_input = pd.DataFrame({'weekday': [int(dt.strftime('%w'))]*len(hours), 'hour': list(hours), 'weather_score': [score_ai]*len(hours), 'is_game_day': [is_game]*len(hours), 'is_playoff_game': [is_playoff]*len(hours), 'temperature': [day_temp]*len(hours), 'is_special_event': [is_special]*len(hours)})[FEATURE_COLUMNS]
                 for fmt in ['250g', '1kg', '2kg']: day_stats["totals"][fmt] = int(sum(models[fmt].predict(df_input))) if fmt in models else 0
             weekly_results.append(day_stats)
