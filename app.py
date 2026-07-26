@@ -161,6 +161,32 @@ def get_history():
         rows = conn.execute("SELECT action_type, detail, timestamp FROM logs ORDER BY id DESC LIMIT 5").fetchall()
     return jsonify([{"type": r[0], "detail": r[1], "heure": datetime.strptime(r[2].split('.')[0], "%Y-%m-%d %H:%M:%S").strftime("%H:%M")} for r in rows])
 
+@app.route('/api/history_days')
+def get_history_days():
+    # summary of every day with reported sales (most recent first), for the Historique page
+    with sqlite3.connect(DB_NAME) as conn:
+        rows = conn.execute("""
+            SELECT date(timestamp),
+                   SUM(CASE WHEN detail = '250g' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN detail = '1kg' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN detail = '2kg' THEN 1 ELSE 0 END)
+            FROM logs
+            WHERE action_type = 'VENTE'
+            GROUP BY date(timestamp)
+            ORDER BY date(timestamp) DESC
+        """).fetchall()
+    return jsonify([{"date": r[0], "c250": r[1], "c1kg": r[2], "c2kg": r[3]} for r in rows])
+
+@app.route('/api/history_day/<date_str>')
+def get_history_day(date_str):
+    # hourly breakdown for one specific day, used when a day is expanded
+    with sqlite3.connect(DB_NAME) as conn:
+        rows = conn.execute("SELECT strftime('%H', timestamp), detail, COUNT(*) FROM logs WHERE action_type = 'VENTE' AND date(timestamp) = ? GROUP BY strftime('%H', timestamp), detail", (date_str,)).fetchall()
+    hourly_data = {f"{h:02d}": {"250g": 0, "1kg": 0, "2kg": 0} for h in range(10, 19)}
+    for h, fmt, count in rows:
+        if h in hourly_data and fmt in hourly_data[h]: hourly_data[h][fmt] = count
+    return jsonify(hourly_data)
+
 @app.route('/api/prediction')
 def get_prediction():
     # calculate predictions for the remainder of the day

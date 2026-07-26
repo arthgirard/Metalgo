@@ -1,5 +1,6 @@
 let isGlobalOpen = document.body.getAttribute('data-ouvert') === 'true';
 let salesChart = null;
+let dayCharts = {}; // one Chart.js instance per expanded Historique day
 
 // initialize view
 document.addEventListener('DOMContentLoaded', () => {
@@ -272,5 +273,102 @@ function checkOpenStatus() {
     .then(data => {
         isGlobalOpen = data.ouvert;
         document.body.setAttribute('data-ouvert', isGlobalOpen);
+    });
+}
+
+// open the Historique page (kept separate from changerOnglet so the
+// bottom nav stays on "Rapport", since Historique is a sub-page of it)
+function openHistory() {
+    document.querySelectorAll('.tab-view').forEach(div => div.classList.remove('active'));
+    document.getElementById('view-history').classList.add('active');
+    loadHistoryDays();
+}
+
+// return from Historique back to the Rapport tab
+function closeHistory() {
+    document.getElementById('view-history').classList.remove('active');
+    document.getElementById('view-stats').classList.add('active');
+}
+
+// reformat an ISO date (YYYY-MM-DD) to DD/MM/YYYY for display
+function formatDayLabel(dateStr) {
+    const [y, m, d] = dateStr.split('-');
+    return `${d}/${m}/${y}`;
+}
+
+// list every day that has reported sales, newest first
+function loadHistoryDays() {
+    const container = document.getElementById('history-days-list');
+    if (container.innerHTML.trim() !== "") return;
+
+    fetch('/api/history_days')
+    .then(res => res.json())
+    .then(days => {
+        container.innerHTML = '';
+        if (days.length === 0) {
+            container.innerHTML = '<div class="model-status-text" style="text-align:center;">Aucune donnée.</div>';
+            return;
+        }
+        days.forEach(day => {
+            container.innerHTML += `
+                <div class="day-card">
+                    <div class="day-header" onclick="toggleDay('${day.date}')">
+                        <span class="day-date">${formatDayLabel(day.date)}</span>
+                        <div class="day-totals">
+                            <div class="day-total-col"><span class="stat-val color-250g">${day.c250}</span><span class="stat-lbl">250g</span></div>
+                            <div class="day-total-col"><span class="stat-val color-1kg">${day.c1kg}</span><span class="stat-lbl">1kg</span></div>
+                            <div class="day-total-col"><span class="stat-val color-2kg">${day.c2kg}</span><span class="stat-lbl">2kg</span></div>
+                        </div>
+                    </div>
+                    <div class="day-expand chart-box" id="day-expand-${day.date}" style="display:none;">
+                        <canvas id="day-chart-${day.date}"></canvas>
+                    </div>
+                </div>
+            `;
+        });
+    });
+}
+
+// expand/collapse a day and draw its hourly chart the first time it's opened
+function toggleDay(dateStr) {
+    const expandDiv = document.getElementById(`day-expand-${dateStr}`);
+    const isOpen = expandDiv.style.display === 'block';
+
+    if (isOpen) {
+        expandDiv.style.display = 'none';
+        return;
+    }
+    // unhide before drawing, or Chart.js sizes the canvas to zero
+    expandDiv.style.display = 'block';
+    if (dayCharts[dateStr]) return;
+
+    fetch(`/api/history_day/${dateStr}`)
+    .then(res => res.json())
+    .then(hourlyData => {
+        const ctx = document.getElementById(`day-chart-${dateStr}`);
+        const labels = Object.keys(hourlyData).map(h => h + 'h');
+        const data250 = Object.values(hourlyData).map(d => d['250g']);
+        const data1kg = Object.values(hourlyData).map(d => d['1kg']);
+        const data2kg = Object.values(hourlyData).map(d => d['2kg']);
+
+        dayCharts[dateStr] = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [
+                    { label: '250g', data: data250, backgroundColor: '#B45309' },
+                    { label: '1 kg', data: data1kg, backgroundColor: '#475569' },
+                    { label: '2 kg', data: data2kg, backgroundColor: '#1E3A8A' }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: { cornerRadius: 8 } },
+                scales: {
+                    x: { grid: { display: false }, ticks: { color: '#8C8175', font: {family: 'Inter'} } },
+                    y: { grid: { color: '#E8E2D9' }, ticks: { color: '#8C8175', stepSize: 5, font: {family: 'Inter'} }, border: {display: false}, beginAtZero: true }
+                }
+            }
+        });
     });
 }
