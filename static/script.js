@@ -293,7 +293,8 @@ function closeHistory() {
 // reformat an ISO date (YYYY-MM-DD) to DD/MM/YYYY for display
 function formatDayLabel(dateStr) {
     const [y, m, d] = dateStr.split('-');
-    return `${d}/${m}/${y}`;
+    const wd = ['Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi','Dimanche'][new Date(dateStr).getDay()]
+    return wd+' '+`${d}/${m}/${y}`;
 }
 
 // list every day that has reported sales, newest first
