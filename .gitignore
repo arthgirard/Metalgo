@@ -3,6 +3,11 @@
 
 # DB
 *.db
+# SQLite WAL sidecars. The app runs in WAL mode, so these now appear
+# alongside data.db during normal operation.
+*.db-wal
+*.db-shm
+*.db-journal
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

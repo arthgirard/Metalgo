@@ -2,22 +2,28 @@
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <!-- user-scalable=no removed: staff need to be able to zoom, and blocking
+         pinch-zoom fails WCAG 1.4.4 without buying anything here. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Metalgo - Production</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body>
+<!-- data-ouvert is what the open/closed indicator reads. It used to be
+     computed server-side, handed to this template and then never rendered,
+     so the whole open/closed path was dead on arrival. -->
+<body data-ouvert="{{ 'true' if est_ouvert else 'false' }}">
 
     <div class="app-container">
-        
+
         <div id="view-saisie" class="tab-view active scroll-y">
             <header class="app-header">
                 <div class="header-titles">
                     <h1>
                         <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4L16.5 3.5z"></path></svg>
                         Metalgo
+                        <span class="status-pill" id="status-pill">--</span>
                     </h1>
                     <span>Journal de ventes</span>
                 </div>
@@ -85,7 +91,7 @@
                     <canvas id="salesChart"></canvas>
                 </div>
             </section>
-            
+
             <div class="info-grid">
                 <div class="block-card info-card">
                     <span class="info-lbl">Heure de pointe</span>
@@ -127,7 +133,7 @@
                 <button class="tab-pill active" onclick="switchPredict('day', this)">Aujourd'hui</button>
                 <button class="tab-pill" onclick="switchPredict('week', this)">7 Jours</button>
             </div>
-            
+
             <div id="predict-day-content">
                 <section class="block-card focus-card">
                     <div class="context-banner">
@@ -141,24 +147,35 @@
                         </div>
                     </div>
 
-                    <h2 class="block-title" style="margin-top: 1.5rem; text-align: center;">À produire</h2>
-
+                    <!-- "À produire" was misleading: the number is the whole
+                         day's demand, already-sold bags included, so reading it
+                         as a production target over-produced by whatever had
+                         already been sold. -->
+                    <h2 class="block-title" style="margin-top: 1.5rem; text-align: center;">Total du jour</h2>
 
                     <div id="trend-container" class="trend-badge" style="display: none;">
                         <span id="trend-badge-text">...</span>
                     </div>
 
+                    <!-- The range under each number is the model's measured
+                         error on held-out days, narrowing as the day gets
+                         locked in. Not the spread across the forest's trees,
+                         which only says how much the trees agree with each
+                         other and read as ±1 bag against a real error near 8. -->
                     <div class="prediction-grid">
                         <div class="pred-item">
                             <span class="pred-val color-250g" id="pred-250g">0</span>
+                            <span class="pred-range" id="range-250g"></span>
                             <span class="pred-lbl">250g</span>
                         </div>
                         <div class="pred-item">
                             <span class="pred-val color-1kg" id="pred-1kg">0</span>
+                            <span class="pred-range" id="range-1kg"></span>
                             <span class="pred-lbl">1 kg</span>
                         </div>
                         <div class="pred-item">
                             <span class="pred-val color-2kg" id="pred-2kg">0</span>
+                            <span class="pred-range" id="range-2kg"></span>
                             <span class="pred-lbl">2 kg</span>
                         </div>
                     </div>
