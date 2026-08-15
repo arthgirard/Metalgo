@@ -79,28 +79,23 @@ def get_game_info(date_obj):
     return 0, 0
 
 
-# Event key
-def get_event_key(date_obj):
-    """
-    Returns a canonical, stable string key for the non-NHL special event on
-    date_obj, or None if no special event occurs.
-
-    These keys are stored in the daily_snapshots table and serve as the
-    primary identifier when computing per-event learned multipliers.
-    NHL games use separate keys ("nhl_regular" / "nhl_playoff") handled
-    internally by _get_learned_multiplier.
-    """
-    # 1. Fixed calendar dates
+# Event detection
+def _fixed_event(date_obj):
+    """The fixed-calendar event on this date, as (key, name, default), or None."""
     fixed_key = (date_obj.month, date_obj.day)
-    if fixed_key in FIXED_EVENTS:
-        return f"fixed_{date_obj.month:02d}-{date_obj.day:02d}"
+    if fixed_key not in FIXED_EVENTS:
+        return None
+    name, default_mult = FIXED_EVENTS[fixed_key]
+    return f"fixed_{date_obj.month:02d}-{date_obj.day:02d}", name, default_mult
 
-    # 2. Mobile dates
+
+def _mobile_event(date_obj):
+    """The moving-date event on this date, as (key, name, default), or None."""
     easter_date = easter(date_obj.year)
     if date_obj == easter_date:
-        return "mobile_easter"
+        return "mobile_easter", "🐰 Pâques", 1.6
     if date_obj == easter_date - timedelta(days=1):
-        return "mobile_easter_saturday"
+        return "mobile_easter_saturday", "🐰 Samedi de Pâques", 1.5
 
     # Super Bowl: second Sunday of February
     if date_obj.month == 2 and date_obj.weekday() == 6:
@@ -108,17 +103,68 @@ def get_event_key(date_obj):
         offset = (6 - feb_first.weekday() + 7) % 7
         first_sunday = feb_first + timedelta(days=offset)
         if date_obj == first_sunday + timedelta(weeks=1):
-            return "mobile_super_bowl"
-
-    # 3. Generic Quebec public holidays
-    #    Christmas Eve and New Year's Eve are handled as fixed events above,
-    #    so we explicitly exclude them here to avoid duplicate keys.
-    if date_obj in qc_holidays:
-        holiday_name = qc_holidays.get(date_obj, "")
-        if "Noël" not in holiday_name and "Jour de l'An" not in holiday_name:
-            return "qc_holiday"
-
+            return "mobile_super_bowl", "🏈 Super Bowl", 1.5
     return None
+
+
+def _holiday_event(date_obj):
+    """
+    A generic Quebec public holiday, as (key, name, default), or None.
+
+    There used to be a name filter here dropping any holiday containing
+    "Noël" or "Jour de l'An", meant to stop Christmas Eve and New Year's Eve
+    from producing a second key alongside their fixed events. It could never
+    have done that — 24 and 31 December are not Quebec public holidays, so no
+    duplicate was possible — and what it actually did was erase Christmas Day
+    itself, whose holiday name is "Jour de Noël". Boxing-day-week demand was
+    being forecast as an ordinary Friday.
+
+    New Year's Day survived only by accident: the library spells it "Jour de
+    l'an" with a lowercase A and the filter tested for "Jour de l'An".
+
+    Duplicates are now prevented structurally instead — get_all_events only
+    consults this function when nothing more specific matched.
+    """
+    if date_obj not in qc_holidays:
+        return None
+    holiday_name = qc_holidays.get(date_obj, "")
+    return "qc_holiday", f"🎉 {holiday_name or 'Jour Férié'}", 1.2
+
+
+def get_all_events(date_obj):
+    """
+    Every non-NHL event on this date, most specific first.
+
+    Fixed and mobile events can genuinely coincide — the 2027 Super Bowl falls
+    on Saint-Valentin — and the old single-return chain made the second one
+    vanish completely, so that day would have been forecast as an ordinary
+    Valentine's. A generic public holiday is only reported when nothing more
+    specific matched, since Saint-Jean is already both and naming it twice
+    helps nobody.
+    """
+    events = [event for event in (_fixed_event(date_obj), _mobile_event(date_obj)) if event]
+    if not events:
+        holiday = _holiday_event(date_obj)
+        if holiday:
+            events.append(holiday)
+    return events
+
+
+def get_event_key(date_obj):
+    """
+    Returns a canonical, stable string key for the non-NHL special event on
+    date_obj, or None if no special event occurs.
+
+    These keys are stored in the daily_snapshots table and serve as the
+    primary identifier when computing per-event learned multipliers. When two
+    events coincide the most specific one is the key, so the keys already in
+    daily_snapshots keep their meaning.
+
+    NHL games use separate keys ("nhl_regular" / "nhl_playoff") handled
+    internally by _get_learned_multiplier.
+    """
+    events = get_all_events(date_obj)
+    return events[0][0] if events else None
 
 
 # Learned multiplier engine
@@ -127,19 +173,26 @@ def _get_learned_multiplier(event_key, default_multiplier, db_path, is_nhl_key=F
     Queries the daily_snapshots table to derive a data-driven sales multiplier
     for the given event_key, then blends it with the hardcoded default prior.
     """
+    conn = None
     try:
-        conn = sqlite3.connect(db_path)
+        # busy_timeout so a concurrent snapshot/retrain write can't turn this
+        # into a "database is locked" error on a live prediction request.
+        conn = sqlite3.connect(db_path, timeout=10.0)
         c = conn.cursor()
 
         # --- Fetch event-day statistics ---
         if is_nhl_key:
             is_playoff = 1 if event_key == "nhl_playoff" else 0
+            # `event_key IS NULL` matters: the baseline below excludes both
+            # holidays and game days, so counting a Saint-Jean-that-was-also-a
+            # -game-day here would charge the whole holiday uplift to the
+            # Canadiens and inflate the NHL multiplier.
             c.execute("""
                 SELECT AVG(total_250g + total_1kg + total_2kg),
                        COUNT(*),
                        GROUP_CONCAT(weekday)
                 FROM daily_snapshots
-                WHERE is_nhl_game = 1 AND is_nhl_playoff = ?
+                WHERE is_nhl_game = 1 AND is_nhl_playoff = ? AND event_key IS NULL
             """, (is_playoff,))
         else:
             c.execute("""
@@ -157,7 +210,6 @@ def _get_learned_multiplier(event_key, default_multiplier, db_path, is_nhl_key=F
 
         # Not enough data — return the prior unchanged
         if n_events == 0 or event_avg is None or weekdays_raw is None:
-            conn.close()
             return default_multiplier
 
         # Determine which weekdays these events occurred on (for a fair baseline)
@@ -175,7 +227,6 @@ def _get_learned_multiplier(event_key, default_multiplier, db_path, is_nhl_key=F
 
         baseline_row = c.fetchone()
         baseline_avg = baseline_row[0] if baseline_row and baseline_row[0] else None
-        conn.close()
 
         if not baseline_avg or baseline_avg == 0:
             # No baseline available yet (e.g. only event days recorded so far)
@@ -191,6 +242,10 @@ def _get_learned_multiplier(event_key, default_multiplier, db_path, is_nhl_key=F
     except Exception as e:
         print(f"Error computing learned multiplier for '{event_key}': {e}")
         return default_multiplier
+
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # Public API
@@ -209,36 +264,38 @@ def get_special_event(date_obj, db_path=None):
         Halloween, Québec public holidays, etc). nhl_multiplier reflects the
         Canadiens game/playoff boost on its own, or 1.0 if there's no game.
 
-        These are returned SEPARATELY on purpose: the RandomForest model is
-        trained with is_game_day / is_playoff_game as features, so it has
-        already learned the NHL effect from history. Callers feeding a
-        prediction into that model should use base_multiplier alone —
-        multiplying nhl_multiplier back in double-counts the game-day boost.
-        Only combine them (base_multiplier * nhl_multiplier) for a caller
-        that is NOT going through the ML model and has no other way of
-        knowing today is a game day (e.g. a naive linear fallback).
+        These are returned SEPARATELY because the model knows about exactly
+        one of them:
+
+        * NHL — the RandomForest is trained with is_game_day /
+          is_playoff_game as features and has learned the effect from ~10
+          recorded game days. Callers going through the model must NOT
+          multiply nhl_multiplier back in; that double-counts the boost.
+
+        * Calendar events — deliberately NOT a model feature. A single binary
+          is_special_event lumped Saint-Jean (≈2x) together with Halloween
+          (≈1.3x), and with only a couple of event days ever recorded the
+          model could never separate them anyway. The Bayesian blend below is
+          far more sample-efficient at this data volume, so callers going
+          through the model SHOULD apply base_multiplier themselves.
+
+        A caller that is not going through the model at all (the naive linear
+        fallback) has no other way of knowing today is a game day, and so
+        applies both: base_multiplier * nhl_multiplier.
     """
     event_name = None
     base_multiplier = 1.0
-    event_key  = get_event_key(date_obj)
+    events = get_all_events(date_obj)
 
     # --- Non-NHL event ---
-    if event_key:
-        # Resolve display name and default multiplier from static definitions
-        fixed_key = (date_obj.month, date_obj.day)
-        if fixed_key in FIXED_EVENTS:
-            event_name, default_mult = FIXED_EVENTS[fixed_key]
-        elif event_key == "mobile_easter":
-            event_name, default_mult = "🐰 Pâques", 1.6
-        elif event_key == "mobile_easter_saturday":
-            event_name, default_mult = "🐰 Samedi de Pâques", 1.5
-        elif event_key == "mobile_super_bowl":
-            event_name, default_mult = "🏈 Super Bowl", 1.5
-        elif event_key == "qc_holiday":
-            holiday_label = qc_holidays.get(date_obj, "Jour Férié")
-            event_name, default_mult = f"🎉 {holiday_label}", 1.2
-        else:
-            event_name, default_mult = "🎉 Événement", 1.0
+    if events:
+        event_key = events[0][0]
+        event_name = " + ".join(name for _, name, _ in events)
+        # The strongest prior wins rather than the product: two events landing
+        # on the same day don't multiply demand, the bigger occasion simply
+        # dominates it. Multiplying a 1.5 Super Bowl by a 1.4 Saint-Valentin
+        # would forecast a 2.1x day nobody has ever observed.
+        default_mult = max(default for _, _, default in events)
 
         base_multiplier = (
             _get_learned_multiplier(event_key, default_mult, db_path)
