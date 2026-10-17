@@ -380,50 +380,122 @@ function switchPredict(mode, btn) {
     } else {
         el('predict-day-content').style.display = 'none';
         el('predict-week-content').style.display = 'block';
-        loadWeeklyForecast();
+        loadPlan();
     }
 }
 
 // Refetched on every open. The old guard returned early whenever the
-// container already had content, so the 7-day view was frozen at whatever it
+// container already had content, so the view was frozen at whatever it
 // showed the first time until someone reloaded the whole page.
-function loadWeeklyForecast() {
-    const container = el('week-list');
+function loadPlan() {
+    const container = el('plan-list');
     const loading = el('loading-week');
     if (!container) return;
     if (loading) loading.style.display = 'block';
 
-    fetch('/api/forecast_week')
+    fetch('/api/plan')
         .then(res => res.json())
         .then(data => {
             if (loading) loading.style.display = 'none';
-
-            if (!Array.isArray(data) || data.error || data.length === 0) {
+            if (!Array.isArray(data) || data.length === 0) {
                 container.innerHTML =
                     '<div class="model-status-text" style="text-align:center;">Données indisponibles.</div>';
                 return;
             }
-
-            container.innerHTML = data.filter(jour => !jour.ferme).map(jour => {
-                const cols = FORMATS.map(fmt => {
-                    const total = (jour.totals || {})[fmt];
-                    return `<div class="w-col"><span class="v ${FORMAT_CLASSES[fmt]}">${esc(total === undefined ? 0 : total)}</span>` +
-                           `<span class="l">${esc(FORMAT_LABELS[fmt])}</span></div>`;
-                }).join('');
-
-                return `<div class="week-card">
-                    <div class="week-header">
-                        <span class="week-date">${esc(jour.date_affichee)}</span>
-                        <span class="week-meteo">${esc(jour.meteo)}</span>
-                    </div>
-                    <div class="week-data">${cols}</div>
-                </div>`;
-            }).join('');
+            container.innerHTML = data.map(planCard).join('');
         })
         .catch(() => {
             if (loading) loading.style.display = 'none';
             container.innerHTML =
                 '<div class="model-status-text" style="text-align:center;">Données indisponibles.</div>';
+        });
+}
+
+function savedLabel(stamp) {
+    return stamp ? `Enregistré · ${esc(stamp.slice(11, 16))}` : '';
+}
+
+function lastWeekLine(week) {
+    if (!week) return '';
+    const parts = (week.conversions || []).map(c =>
+        `${esc(c.source_bags)} × ${esc(c.source)} → ${esc(c.target)}`);
+    (week.ruptures || []).forEach(fmt => parts.push(`rupture ${esc(fmt)}`));
+    (week.incoherent || []).forEach(fmt => parts.push(`${esc(fmt)} incohérent`));
+    return parts.length ? `<div class="plan-note muted">Sem. dernière : ${parts.join(' · ')}</div>` : '';
+}
+
+function changeLine(day) {
+    if (!day.changement || !day.plan) return '';
+    const parts = Object.keys(day.changement).map(fmt =>
+        `${esc(FORMAT_LABELS[fmt] || fmt)} ${esc(day.changement[fmt])} (au lieu de ${esc(day.plan[fmt])})`);
+    return `<div class="plan-note warn">Nouvelle recommandation : ${parts.join(', ')}</div>`;
+}
+
+function planCard(day) {
+    const saved = day.plan !== null && day.plan !== undefined;
+    const cols = FORMATS.map(fmt => {
+        const rec = (day.recommande || {})[fmt];
+        const expected = (day.attendu || {})[fmt];
+        const value = saved ? day.plan[fmt] : (rec === undefined ? '' : rec);
+        return `<div class="w-col">
+            <span class="l">${esc(FORMAT_LABELS[fmt])}</span>
+            <input class="plan-input ${FORMAT_CLASSES[fmt]}" type="number" inputmode="numeric"
+                   min="0" max="999" step="1" data-format="${esc(fmt)}" value="${esc(value)}">
+            <span class="plan-rec">Recommandé ${esc(rec === undefined ? '–' : rec)}</span>
+            <span class="plan-exp">${expected === undefined ? '' : `attendu ≈ ${esc(Math.round(expected))}`}</span>
+        </div>`;
+    }).join('');
+    const meta = [day.meteo, day.evenement].filter(Boolean).map(esc).join(' · ');
+
+    return `<div class="week-card plan-card${saved ? ' saved' : ''}" data-date="${esc(day.date)}">
+        <div class="week-header">
+            <span class="week-date">${esc(day.date_affichee)}</span>
+            <span class="week-meteo">${meta}</span>
+        </div>
+        <div class="week-data">${cols}</div>
+        ${changeLine(day)}
+        ${lastWeekLine(day.semaine_derniere)}
+        <div class="plan-actions">
+            <span class="plan-status">${savedLabel(day.plan_maj)}</span>
+            <button class="btn-utility" onclick="savePlan('${esc(day.date)}')">Enregistrer</button>
+        </div>
+        <div class="plan-error" style="display: none;"></div>
+    </div>`;
+}
+
+function savePlan(date) {
+    const card = document.querySelector(`.plan-card[data-date="${date}"]`);
+    if (!card) return;
+    const error = card.querySelector('.plan-error');
+    const bags = {};
+    card.querySelectorAll('.plan-input').forEach(input => {
+        // Sent as typed; the server is the one place that decides what counts
+        // as a valid number of bags, and says why when it refuses.
+        const n = Number(input.value);
+        bags[input.dataset.format] = input.value.trim() === '' ? null : n;
+    });
+
+    fetch('/api/plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, bags }),
+    })
+        .then(res => res.json().then(body => ({ ok: res.ok, body })))
+        .then(({ ok, body }) => {
+            if (!ok) {
+                error.textContent = body.message || 'Erreur';
+                error.style.display = 'block';
+                return;
+            }
+            error.style.display = 'none';
+            card.classList.add('saved');
+            card.querySelector('.plan-status').innerHTML = savedLabel(body.plan_maj || localStamp(new Date()));
+            const warn = card.querySelector('.plan-note.warn');
+            if (warn) warn.remove();
+        })
+        .catch(() => {
+            error.textContent = 'Connexion impossible, réessayez.';
+            error.style.display = 'block';
         });
 }
 

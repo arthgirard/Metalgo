@@ -131,7 +131,7 @@
 
             <div class="tabs-nav">
                 <button class="tab-pill active" onclick="switchPredict('day', this)">Aujourd'hui</button>
-                <button class="tab-pill" onclick="switchPredict('week', this)">7 Jours</button>
+                <button class="tab-pill" onclick="switchPredict('week', this)">Planification</button>
             </div>
 
             <div id="predict-day-content">
@@ -193,7 +193,10 @@
 
             <div id="predict-week-content" style="display: none;">
                 <div id="loading-week" class="model-status-text" style="text-align: center; margin-top: 2rem;">Chargement...</div>
-                <div id="week-list" class="week-container"></div>
+                <!-- One card per open day. The bags typed here are what was
+                     really bagged that morning: without them a sell-out looks
+                     exactly like a quiet afternoon to the forecast. -->
+                <div id="plan-list" class="week-container"></div>
             </div>
         </div>
 

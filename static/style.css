@@ -169,6 +169,19 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 .w-col .v { font-weight: 800; font-size: 1.1rem; display: block; }
 .w-col .l { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-top: 2px; display: block; }
 
+/* Planification: the week cards, made editable */
+.plan-card .week-data { gap: 8px; }
+.plan-card.saved { border-color: var(--pos-border); background: #FBFAF7; }
+.plan-input { width: 100%; max-width: 88px; box-sizing: border-box; margin: 6px auto 4px; display: block; text-align: center; font-size: 1.2rem; font-weight: 800; padding: 8px 4px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-app); }
+.plan-rec { display: block; font-size: 0.75rem; font-weight: 700; color: var(--text-main); }
+.plan-exp { display: block; font-size: 0.7rem; color: var(--range-text); font-weight: 600; min-height: 1em; }
+.plan-note { font-size: 0.8rem; font-weight: 600; margin-top: 12px; }
+.plan-note.warn { color: var(--brand-accent); }
+.plan-note.muted { color: var(--text-muted); }
+.plan-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; gap: 12px; }
+.plan-status { font-size: 0.8rem; font-weight: 700; color: var(--fmt-1kg); }
+.plan-error { font-size: 0.8rem; font-weight: 600; color: var(--danger); margin-top: 8px; }
+
 .bottom-bar {
     position: fixed; bottom: 0; width: 100%; height: 75px;
     background: var(--bg-card); border-top: 1px solid var(--border-soft);
