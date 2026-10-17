@@ -292,17 +292,6 @@ class TestUncertaintyBand:
         assert app_module._uncertainty(payload, "250g", 3.0) == pytest.approx(8.0)
         assert app_module._uncertainty(payload, "250g", -1.0) == 0.0
 
-    def test_weekly_forecast_carries_no_band(self, app_module, client, monkeypatch):
-        """
-        Deliberately unqualified. A full day ahead carries the whole measured
-        error, wide enough to crowd out the number it qualifies; the daily
-        view keeps a band because it narrows as the day gets locked in.
-        """
-        monkeypatch.setattr(app_module, "get_weekly_forecast", lambda: [])
-        for day in client.get('/api/forecast_week').get_json() or []:
-            assert "totals_min" not in day
-            assert "totals_max" not in day
-
     def test_band_never_dips_below_what_is_already_sold(self, app_module, client, monkeypatch):
         """
         The day's total cannot come in under the bags already in customers'

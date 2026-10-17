@@ -20,7 +20,7 @@ from meteo import (FALLBACK_TEMPERATURE, NEUTRAL_WEATHER_SCORE, get_current_weat
                    weather_score_from_label)
 import forecast
 from legacy_forest import FEATURE_COLUMNS
-from train_model import PAYLOAD_VERSION, train_model
+from train_model import PAYLOAD_VERSION, day_inputs, train_model
 
 app = Flask(__name__)
 
@@ -609,69 +609,120 @@ def _build_prediction(now, real_sales):
     }
 
 
-@app.route('/api/forecast_week')
-def forecast_week_endpoint():
-    # forecast volumes for the next 7 days based on weather and events
-    payload = get_model_payload()
-    models = payload.get("models") if payload else None
-    if not models:
-        return jsonify({"error": "Modèle manquant"})
+# A saved plan is flagged when the recommendation has since moved by at
+# least this much: two bags, or 15% of what was recommended at the time.
+CHANGE_NOTICE_MIN_BAGS = 2
+CHANGE_NOTICE_FRACTION = 0.15
 
+# Anything above this is a typo, not a plan.
+MAX_PLAN_BAGS = 999
+
+
+def _changed(stored, current):
+    """Formats whose recommendation moved materially since the plan was saved."""
+    moved = {}
+    for fmt, then in (stored or {}).items():
+        now = current.get(fmt)
+        if now is not None and abs(now - then) >= max(CHANGE_NOTICE_MIN_BAGS,
+                                                      math.ceil(CHANGE_NOTICE_FRACTION * then)):
+            moved[fmt] = now
+    return moved or None
+
+
+def _last_week(conn, day):
+    """The same weekday a week earlier, as the planner used to read it off paper."""
+    then = (day - timedelta(days=7)).strftime("%Y-%m-%d")
+    status = stock.day_status(conn, then) or {}
+    return {
+        "date": then,
+        "conversions": stock.get_conversions(conn, then),
+        "ruptures": [fmt for fmt, e in status.items() if e["status"] == "sold_out"],
+        "incoherent": [fmt for fmt, e in status.items() if e["status"] == "incoherent"],
+    }
+
+
+def _recommendations(model, day, weekly):
+    """(expected, recommended) per format for `day`, or two empty dicts without a model."""
+    if model is None:
+        return {}, {}
+    kwargs = day_inputs(day, DB_NAME, weekly)
+    expected = {fmt: round(forecast.mean(model, day, fmt, **kwargs), 1) for fmt in sched.FORMATS}
+    recommended = {fmt: forecast.recommend(model, day, fmt, **kwargs) for fmt in sched.FORMATS}
+    return expected, recommended
+
+
+@app.route('/api/plan')
+def get_plan():
+    """
+    Today and the following seven calendar days that are open, each with the
+    recommendation, any saved plan, and last week's same weekday.
+
+    The planner often fills a whole weekend in two days ahead, so nothing
+    here assumes anyone looks at it on the morning itself.
+    """
+    today = today_local()
+    model = get_demand_model()
+    weekly = {d["date"]: d for d in get_weekly_forecast()}
+    days = sched.upcoming_open_days(today)
+
+    with get_conn() as conn:
+        plans = stock.get_plans(conn, [d.strftime("%Y-%m-%d") for d in days])
+        result = []
+        for day in days:
+            key = day.strftime("%Y-%m-%d")
+            expected, recommended = _recommendations(model, day, list(weekly.values()))
+            plan = plans.get(key)
+            forecast_day = weekly.get(key) or {}
+            result.append({
+                "date": key,
+                "date_affichee": f"{sched.WEEKDAY_NAMES_FR[day.weekday()]} {day.day}",
+                "meteo": forecast_day.get("description"),
+                "temperature": forecast_day.get("temperature"),
+                "evenement": get_special_event(day, db_path=DB_NAME)[0],
+                "attendu": expected,
+                "recommande": recommended,
+                "plan": plan["bags"] if plan else None,
+                "plan_maj": plan["updated_at"] if plan else None,
+                "changement": _changed(plan["recommended"], recommended) if plan else None,
+                "semaine_derniere": _last_week(conn, day),
+            })
+    return jsonify(result)
+
+
+def _plan_error(message):
+    return jsonify({"status": "error", "message": message}), 400
+
+
+@app.route('/api/plan', methods=['POST'])
+def save_plan():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _plan_error("Requête invalide")
+
+    raw_date = data.get("date")
+    if not isinstance(raw_date, str) or not _DATE_RE.match(raw_date):
+        return _plan_error("Date invalide")
     try:
-        today_str = today_local().strftime("%Y-%m-%d")
-        # Selected by date rather than by list position: slicing [1:8] assumed
-        # the API's first entry is always today, which is only true as long as
-        # nothing shifts the series.
-        upcoming = [d for d in get_weekly_forecast() if d["date"] > today_str][:7]
+        day = datetime.strptime(raw_date, "%Y-%m-%d").date()
+    except ValueError:
+        return _plan_error("Date invalide")
+    if day not in sched.upcoming_open_days(today_local()):
+        return _plan_error("Jour fermé ou hors de la période de planification")
 
-        weekly_results = []
-        for day_data in upcoming:
-            dt = datetime.strptime(day_data['date'], "%Y-%m-%d")
-            event_name, base_event_factor, _ = get_special_event(dt.date(), db_path=DB_NAME)
-            is_game, is_playoff = get_game_info(dt.date())
-            closed = sched.is_closed_on(dt.date())
+    bags = data.get("bags")
+    if not isinstance(bags, dict) or set(bags) != set(sched.FORMATS):
+        return _plan_error("Il faut un nombre pour chaque format")
+    for fmt, count in bags.items():
+        # bool is an int subclass; True would otherwise be stored as 1 bag.
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= MAX_PLAN_BAGS:
+            return _plan_error(f"Nombre invalide pour {fmt}")
 
-            day_temp = day_data.get('temperature')
-            if day_temp is None:
-                day_temp = FALLBACK_TEMPERATURE
-            score = day_data.get('score')
-            if score is None:
-                score = NEUTRAL_WEATHER_SCORE
-
-            day_stats = {
-                "date": day_data['date'],
-                "date_affichee": f"{sched.WEEKDAY_NAMES_FR[dt.weekday()]} {dt.day}",
-                "meteo": day_data['description'],
-                "temperature": day_data.get('temperature'),
-                "totals": {},
-                "ferme": closed,
-                "event": event_name,
-            }
-
-            if not closed:
-                hours = list(sched.selling_hours(dt.weekday()))
-                rows = _feature_rows(hours, sched.sql_weekday_from_py(dt.weekday()), {},
-                                     score, day_temp, is_game, is_playoff)
-                weights = [1] * len(hours)
-                for fmt in sched.FORMATS:
-                    if fmt not in models:
-                        day_stats["totals"][fmt] = 0
-                        continue
-                    # round, not truncate — int() was shaving up to a full bag
-                    # off every format of every day.
-                    raw = _predict_total(models[fmt], rows, weights) * base_event_factor
-                    day_stats["totals"][fmt] = max(0, int(round(raw)))
-                    # No error band here on purpose. A whole day ahead carries
-                    # the full measured error, which is wide enough relative to
-                    # the forecast that it crowded out the number it was meant
-                    # to qualify. The daily view still shows one, where it
-                    # narrows through the day and actually informs a decision.
-
-            weekly_results.append(day_stats)
-        return jsonify(weekly_results)
-    except Exception as e:
-        print(f"Weekly forecast failed: {e}")
-        return jsonify({"error": str(e)})
+    _, recommended = _recommendations(get_demand_model(), day,
+                                      get_weekly_forecast() if (forecast.USE_WEATHER or
+                                                                forecast.USE_TEMPERATURE) else [])
+    with get_conn() as conn:
+        stock.save_plan(conn, raw_date, bags, recommended or None, now_local())
+    return jsonify({"status": "success"})
 
 
 @app.route('/api/retrain', methods=['POST'])
