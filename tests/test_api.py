@@ -1,9 +1,8 @@
-import math
 
 import pytest
 from datetime import datetime, timedelta
 
-from helpers import _count, _insert
+from helpers import _count, _insert, _train_as_of
 
 
 class TestLogValidation:
@@ -215,6 +214,10 @@ class TestStatusAndStats:
 
 
 class TestPrediction:
+    @pytest.fixture(autouse=True)
+    def model(self, app_module, monkeypatch):
+        _train_as_of(app_module, monkeypatch, datetime(2026, 8, 18, 3, 0, 0))
+
     def test_closed_day_returns_the_same_shape_as_an_open_day(self, app_module, client, monkeypatch):
         """
         The Monday early-return used to omit previsions_min/max and
@@ -253,44 +256,13 @@ class TestPrediction:
         for fmt in ("250g", "1kg", "2kg"):
             assert body['previsions_min'][fmt] <= body['previsions'][fmt] <= body['previsions_max'][fmt]
 
-
-class TestUncertaintyBand:
-    """
-    The band under each number is measured holdout error, not the spread
-    across the forest's trees — the latter says only how much the trees agree
-    with each other, and read as about +/-1 bag against a real daily error
-    near 8.
-    """
-
-    @staticmethod
-    def _payload(daily_total_mae):
-        return {"metrics": {"per_format": {"250g": {"daily_total_mae": daily_total_mae}}}}
-
-    def test_full_band_when_the_whole_day_is_ahead(self, app_module):
-        assert app_module._uncertainty(self._payload(8.0), "250g", 1.0) == pytest.approx(8.0)
-
-    def test_band_shrinks_as_the_day_is_locked_in(self, app_module):
-        payload = self._payload(8.0)
-        whole = app_module._uncertainty(payload, "250g", 1.0)
-        half = app_module._uncertainty(payload, "250g", 0.5)
-        nearly_done = app_module._uncertainty(payload, "250g", 0.1)
-        assert whole > half > nearly_done
-        assert half == pytest.approx(8.0 * math.sqrt(0.5))
-
-    def test_no_band_left_at_closing_time(self, app_module):
-        assert app_module._uncertainty(self._payload(8.0), "250g", 0.0) == 0.0
-
-    def test_none_when_the_model_was_never_scored(self, app_module):
-        assert app_module._uncertainty({"metrics": {}}, "250g", 1.0) is None
-        assert app_module._uncertainty(None, "250g", 1.0) is None
-        # A format the holdout could not score gets no band rather than a
-        # fabricated one.
-        assert app_module._uncertainty(self._payload(8.0), "1kg", 1.0) is None
-
-    def test_fraction_is_clamped(self, app_module):
-        payload = self._payload(8.0)
-        assert app_module._uncertainty(payload, "250g", 3.0) == pytest.approx(8.0)
-        assert app_module._uncertainty(payload, "250g", -1.0) == 0.0
+    def test_band_narrows_through_the_day(self, app_module, client, monkeypatch):
+        def width(now):
+            monkeypatch.setattr(app_module, "now_local", lambda: now)
+            app_module._prediction_cache.update({"key": None, "value": None})
+            body = client.get('/api/prediction').get_json()
+            return body['previsions_max']['250g'] - body['previsions_min']['250g']
+        assert width(datetime(2026, 8, 18, 11, 0)) > width(datetime(2026, 8, 18, 15, 0))
 
     def test_band_never_dips_below_what_is_already_sold(self, app_module, client, monkeypatch):
         """
@@ -301,12 +273,43 @@ class TestUncertaintyBand:
         monkeypatch.setattr(app_module, "now_local", lambda: afternoon)
         today = afternoon.strftime("%Y-%m-%d")
         for hour in range(10, 16):
-            for _ in range(5):
-                _insert(app_module, f"{today} {hour}:00:00", "250g")
+            for i in range(5):
+                _insert(app_module, f"{today} {hour}:{i * 10:02d}:00", "250g")
 
         body = client.get('/api/prediction').get_json()
         assert body['previsions_min']['250g'] >= 30
 
+    def test_projected_end_stock_needs_a_plan(self, app_module, client, monkeypatch):
+        afternoon = datetime(2026, 8, 18, 14, 0, 0)
+        monkeypatch.setattr(app_module, "now_local", lambda: afternoon)
+        assert client.get('/api/prediction').get_json()['stock_fin_prevu'] is None
+
+    def test_projected_end_stock_with_a_plan(self, app_module, client, monkeypatch):
+        afternoon = datetime(2026, 8, 18, 14, 0, 0)
+        monkeypatch.setattr(app_module, "now_local", lambda: afternoon)
+        import stock
+        with app_module.get_conn() as conn:
+            stock.save_plan(conn, "2026-08-18", {"250g": 20, "1kg": 20, "2kg": 2}, None, afternoon)
+        for i in range(15):
+            _insert(app_module, f"2026-08-18 11:{i * 3:02d}:00", "250g")
+        body = client.get('/api/prediction').get_json()
+        # 5 left on the shelf with two and a half hours of selling to go.
+        assert body['stock_fin_prevu']['250g'] < 5
+
+
+class TestPredictionWithoutModel:
+    def test_mirrors_what_is_sold(self, app_module, client, monkeypatch):
+        tuesday = datetime(2026, 8, 18, 14, 0, 0)
+        monkeypatch.setattr(app_module, "now_local", lambda: tuesday)
+        for hour in range(10, 14):
+            _insert(app_module, f"2026-08-18 {hour}:00:00", "1kg")
+        body = client.get('/api/prediction').get_json()
+        assert body['previsions'] == {"250g": 0, "1kg": 4, "2kg": 0}
+        assert body['previsions_min'] == body['previsions_max'] == body['previsions']
+        assert body['debug_info'] == "Modèle manquant"
+
+
+class TestPredictionCache:
     def test_is_cached_within_the_same_minute(self, app_module, client, monkeypatch):
         frozen = datetime(2026, 8, 18, 14, 30, 0)
         monkeypatch.setattr(app_module, "now_local", lambda: frozen)

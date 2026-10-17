@@ -8,18 +8,15 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 import joblib
-import numpy as np
-import pandas as pd
 from flask import Flask, jsonify, render_template, request
 
 import shop_schedule as sched
 import stock
 from event_service import get_event_key, get_game_info, get_special_event
-from meteo import (FALLBACK_TEMPERATURE, NEUTRAL_WEATHER_SCORE, get_current_weather,
-                   get_today_hourly_weather, get_weekly_forecast, now_local, today_local,
+from meteo import (get_current_weather, get_weekly_forecast, now_local, today_local,
                    weather_score_from_label)
 import forecast
-from legacy_forest import FEATURE_COLUMNS
+import history
 from train_model import PAYLOAD_VERSION, day_inputs, train_model
 
 app = Flask(__name__)
@@ -50,13 +47,6 @@ _DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 MAX_BACKDATE_HOURS = 24
 # Slack for a tablet clock running slightly fast.
 MAX_CLOCK_SKEW_MINUTES = 2
-
-# "Virtual" prior sales the intraday correction ratio must out-weigh before it's
-# trusted (same smoothing idea as SMOOTHING_FACTOR in event_service.py).
-# Also scaled by how much of the day has elapsed in get_prediction, so a
-# popular format can't earn high confidence just from raw predicted volume
-# in the first hour — see the time_fraction comment there.
-CORRECTION_SMOOTHING = 3.0
 
 # Nightly retrain time (24h). Chosen well after closing and well before
 # opening so it never contends with `/api/log` writes during business hours.
@@ -210,93 +200,9 @@ def get_demand_model():
     return payload["demand_model"] if payload else None
 
 
-def get_models():
-    # The forest paths below are rewritten onto get_demand_model; until then a
-    # current payload carries no forests and they take their fallback.
-    payload = get_model_payload()
-    return payload.get("models") if payload else None
-
-
 # ---------------------------------------------------------------------------
 # Prediction helpers
 # ---------------------------------------------------------------------------
-
-def _predict_total(model, feature_rows, weights):
-    """
-    The weighted SUM of `model`'s predictions over feature_rows.
-
-    This used to also return a low/high band taken from the spread across the
-    forest's individual trees. That spread measures how much the trees
-    disagree with each other, which is not the same thing as how wrong they
-    tend to be — and once the trees were depth-capped they agreed almost
-    perfectly, collapsing the displayed range to about ±1 bag against a
-    measured daily error near 8. The band now comes from held-out error
-    instead; see _uncertainty.
-    """
-    if not feature_rows:
-        return 0.0
-
-    # Pass the DataFrame itself, not .values: the forest was fitted on named
-    # columns and warns on a bare array. Selecting FEATURE_COLUMNS also
-    # guarantees the order matches training, which sklearn does not do for
-    # you. One vectorised predict() beats looping the trees in Python.
-    X = pd.DataFrame(feature_rows)[FEATURE_COLUMNS]
-    return float((model.predict(X) * np.array(weights)).sum())
-
-
-def _uncertainty(payload, fmt, remaining_fraction):
-    """
-    Half-width of the range shown under each forecast, in bags, or None when
-    the model has never been scored.
-
-    `daily_total_mae` is the mean absolute error on a whole day's total for
-    this format, measured on the chronological holdout — an empirical answer
-    to "how far out is this number usually?".
-
-    It is scaled down as the day progresses, because the hours already sold
-    are counted exactly and only the remaining ones can still be wrong. The
-    square root is the standard way to aggregate per-hour errors: at opening
-    the full day is at stake and the band is the full measured error; with
-    half the day left it is about 71% of it; at closing time it is zero.
-    """
-    metrics = (payload or {}).get("metrics") or {}
-    per_format = metrics.get("per_format") or {}
-    daily_mae = (per_format.get(fmt) or {}).get("daily_total_mae")
-    if not daily_mae:
-        return None
-    return daily_mae * math.sqrt(max(0.0, min(remaining_fraction, 1.0)))
-
-
-def _feature_rows(hours, sql_weekday, hourly_weather, default_score, default_temp, is_game, is_playoff):
-    """
-    Build model input for a list of hours, using that hour's own weather.
-
-    The intraday forecast used to stamp the weather observed *right now*
-    across every remaining hour, so a sunny 10h projected a sunny 16h
-    straight through a forecast rain band. Where the hourly forecast is
-    available each hour now carries its own score and temperature; where it
-    isn't, the current-conditions defaults stand in.
-
-    `temperature` is still populated even though it is not currently in
-    FEATURE_COLUMNS — _predict_total selects the feature columns it
-    needs and ignores the rest. Keeping it here means reinstating the
-    feature is a one-line change in train_model once the weather sampler
-    has accumulated enough per-hour readings. See the note there.
-    """
-    rows = []
-    for hour in hours:
-        observed = hourly_weather.get(hour) or {}
-        temperature = observed.get("temperature")
-        rows.append({
-            'weekday': sql_weekday,
-            'hour': hour,
-            'weather_score': observed.get("score", default_score),
-            'is_game_day': is_game,
-            'is_playoff_game': is_playoff,
-            'temperature': default_temp if temperature is None else temperature,
-        })
-    return rows
-
 
 def _today_sales(conn, date_str):
     return dict(conn.execute(
@@ -482,12 +388,7 @@ def get_prediction():
 
 
 def _build_prediction(now, real_sales):
-    weather_cond, weather_factor, temperature = get_current_weather()
-    temp_for_model = temperature if temperature is not None else FALLBACK_TEMPERATURE
-    current_score = weather_score_from_label(weather_cond)
-    if current_score is None:
-        current_score = NEUTRAL_WEATHER_SCORE
-
+    weather_cond, _, _ = get_current_weather()
     formats = list(sched.FORMATS)
     sold = {fmt: real_sales.get(fmt, 0) for fmt in formats}
 
@@ -496,117 +397,114 @@ def _build_prediction(now, real_sales):
         # deal with a differently-shaped payload on Mondays.
         return {"heures_restantes": 0, "meteo": weather_cond,
                 "previsions": dict(sold), "previsions_min": dict(sold), "previsions_max": dict(sold),
-                "evenement": None, "debug_info": "Fermé"}
+                "evenement": None, "debug_info": "Fermé", "stock_fin_prevu": None}
 
     open_hour, close_hour = sched.OPEN_HOUR, sched.close_hour(now.weekday())
     start_day = now.replace(hour=open_hour, minute=0, second=0, microsecond=0)
     end_day = now.replace(hour=close_hour, minute=0, second=0, microsecond=0)
-    mode, time_left = (("PLANNING", (end_day - start_day).total_seconds() / 3600) if now < start_day
-                       else ("LIVE", max(0, (end_day - now).total_seconds() / 3600)))
-    elapsed_hours = 0 if mode == "PLANNING" else (now - start_day).total_seconds() / 3600
-    business_hours = max(close_hour - open_hour, 1)
+    time_left = ((end_day - start_day) if now < start_day else max(end_day - now, timedelta(0)))
+    event_name = get_special_event(now.date(), db_path=DB_NAME)[0]
 
-    event_name, base_event_factor, nhl_factor = get_special_event(now.date(), db_path=DB_NAME)
-    is_game, is_playoff = get_game_info(now.date())
-    payload = get_model_payload()
-    models = payload.get("models") if payload else None
-    hourly_weather = get_today_hourly_weather()
-    sql_weekday = sched.sql_weekday_from_py(now.weekday())
+    with get_conn() as conn:
+        status = stock.day_status(conn, now.strftime("%Y-%m-%d"))
+        customers = history.customers_on(conn, now.date())
 
-    predictions, predictions_low, predictions_high = {}, {}, {}
-    debug_msg = "Prêt"
+    model = get_demand_model()
+    if model is None:
+        predictions = dict(sold)
+        low = high = dict(sold)
+        remaining = {fmt: 0.0 for fmt in formats}
+        debug_msg = "Modèle manquant"
+    else:
+        out = forecast.intraday(model, now.date(), now, sold, customers,
+                                mean_kwargs=day_inputs(now.date(), DB_NAME, get_weekly_forecast()))
+        predictions = {fmt: f["point"] for fmt, f in out["formats"].items()}
+        low = {fmt: f["low"] for fmt, f in out["formats"].items()}
+        high = {fmt: f["high"] for fmt, f in out["formats"].items()}
+        remaining = {fmt: f["remaining"] for fmt, f in out["formats"].items()}
+        # Read by the trend badge: the pace of the day against the model.
+        debug_msg = f"{int(round(out['multiplier'] * 100))}%"
 
-    if models:
-        try:
-            fmt_multipliers = {fmt: 1.0 for fmt in formats}
-            if mode == "LIVE":
-                # Fraction of the business day elapsed so far. A popular
-                # format's predicted volume for just the first hour can
-                # already be large, which used to make confidence (below)
-                # jump to a high value almost immediately and let one busy
-                # or slow opening stretch swing the whole remaining day's
-                # forecast. Multiplying by time_fraction forces confidence
-                # to build up gradually over the day regardless of format.
-                time_fraction = min(elapsed_hours / business_hours, 1.0)
-                # Clamped to the closing hour: after hours this range used to
-                # run on to 18h, 19h and beyond, feeding the model hours it
-                # was never trained on and corrupting the ratio.
-                last_elapsed_hour = min(now.hour, close_hour - 1)
-                past_hours = list(range(open_hour, last_elapsed_hour + 1))
-                past_rows = _feature_rows(past_hours, sql_weekday, hourly_weather,
-                                          current_score, temp_for_model, is_game, is_playoff)
-                past_weights = [(now.minute / 60 if h == now.hour else 1) for h in past_hours]
-
-                for fmt in formats:
-                    if fmt not in models:
-                        continue
-                    past_pred = _predict_total(models[fmt], past_rows, past_weights)
-                    if past_pred > 0.1:
-                        # Blend the empirical ratio into the prior instead of replacing it outright.
-                        empirical_ratio = max(0.3, min(sold[fmt] / past_pred, 3.0))
-                        confidence = time_fraction * (past_pred / (past_pred + CORRECTION_SMOOTHING))
-                        blended_ratio = confidence * empirical_ratio + (1 - confidence) * 1.0
-                        fmt_multipliers[fmt] = max(0.5, min(blended_ratio, 3.0))
-
-            start_h = open_hour if mode == "PLANNING" else now.hour
-            future_hours = [h for h in range(start_h, close_hour)]
-            future_rows = _feature_rows(future_hours, sql_weekday, hourly_weather,
-                                        current_score, temp_for_model, is_game, is_playoff)
-            future_weights = [(max(0, 60 - now.minute) / 60 if mode == "LIVE" and h == now.hour else 1)
-                              for h in future_hours]
-            # How much of a full trading day is still ahead, used to shrink
-            # the error band as the day gets locked in.
-            remaining_fraction = sum(future_weights) / business_hours
-
-            for fmt in formats:
-                if fmt not in models:
-                    predictions[fmt] = predictions_low[fmt] = predictions_high[fmt] = sold[fmt]
-                    continue
-                point = _predict_total(models[fmt], future_rows, future_weights)
-                # `is_special_event` is no longer a model feature, so the
-                # learned calendar-event factor is applied here. The NHL
-                # factor deliberately is not: is_game_day / is_playoff_game
-                # are still features, and multiplying it back in would
-                # double-count the game-day boost.
-                scale = fmt_multipliers[fmt] * base_event_factor
-                total = sold[fmt] + point * scale
-                predictions[fmt] = int(round(total))
-
-                band = _uncertainty(payload, fmt, remaining_fraction)
-                if band is None:
-                    predictions_low[fmt] = predictions_high[fmt] = predictions[fmt]
-                else:
-                    # The floor is what has already been sold: the day's total
-                    # cannot come in under the bags that are in customers'
-                    # hands.
-                    predictions_low[fmt] = max(sold[fmt], int(round(total - band)))
-                    predictions_high[fmt] = max(predictions_low[fmt], int(round(total + band)))
-            debug_msg = f"{int((sum(fmt_multipliers.values()) / len(fmt_multipliers)) * 100)}%"
-        except Exception as e:
-            print(f"Prediction failed, falling back to linear extrapolation: {e}")
-            models, debug_msg = None, "Erreur"
-
-    if not models:
-        # No trained model available: fall back to naive linear extrapolation,
-        # which has no is_game_day or event feature of its own, so the FULL combined
-        # factor (holiday * NHL) belongs here. No tree ensemble to draw a
-        # range from, so min/max just mirror the point estimate.
-        full_event_factor = base_event_factor * nhl_factor
-        for fmt in formats:
-            extra = (int(round((sold[fmt] / elapsed_hours) * time_left * weather_factor * full_event_factor))
-                     if mode == "LIVE" and elapsed_hours > 0.1 else 0)
-            predictions[fmt] = sold[fmt] + max(0, extra)
-            predictions_low[fmt] = predictions_high[fmt] = predictions[fmt]
-
+    end_stock = (None if status is None else
+                 {fmt: status[fmt]["remaining"] - int(round(remaining[fmt])) for fmt in formats})
     return {
-        "heures_restantes": round(time_left, 1),
+        "heures_restantes": round(time_left.total_seconds() / 3600, 1),
         "meteo": weather_cond,
         "previsions": predictions,
-        "previsions_min": predictions_low,
-        "previsions_max": predictions_high,
+        "previsions_min": low,
+        "previsions_max": high,
         "evenement": event_name,
         "debug_info": debug_msg,
+        "stock_fin_prevu": end_stock,
     }
+
+
+# ---------------------------------------------------------------------------
+# Stock, conversions and the end-of-day record
+# ---------------------------------------------------------------------------
+
+def _bag_count(value):
+    """A whole, plausible number of bags, or None. bool is excluded on purpose."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_PLAN_BAGS:
+        return None
+    return value
+
+
+@app.route('/api/stock')
+def get_stock():
+    today = today_local().strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        status = stock.day_status(conn, today)
+        conversions = stock.get_conversions(conn, today)
+        closing = stock.get_closing(conn, today)
+    return jsonify({"date": today, "plan": status is not None, "formats": status or {},
+                    "conversions": conversions, "cloture": closing})
+
+
+@app.route('/api/conversion', methods=['POST'])
+def add_conversion():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _plan_error("Requête invalide")
+    bags = _bag_count(data.get("source_bags"))
+    if not bags:
+        return _plan_error("Nombre de sacs ouverts invalide")
+    try:
+        with get_conn() as conn:
+            conversion_id = stock.add_conversion(conn, today_local().strftime("%Y-%m-%d"),
+                                                 data.get("source"), data.get("target"), bags,
+                                                 now_local())
+    except ValueError:
+        return _plan_error("Conversion impossible")
+    return jsonify({"status": "success", "id": conversion_id})
+
+
+@app.route('/api/conversion/<int:conversion_id>', methods=['DELETE'])
+def delete_conversion(conversion_id):
+    """Only today's conversions can be removed; earlier days are history."""
+    today = today_local().strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        row = conn.execute("SELECT date FROM conversions WHERE id = ?", (conversion_id,)).fetchone()
+        if row is None or row[0] != today:
+            return jsonify({"status": "error", "message": "Conversion introuvable"}), 404
+        stock.delete_conversion(conn, conversion_id)
+    return jsonify({"status": "success"})
+
+
+@app.route('/api/closing', methods=['POST'])
+def save_closing():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _plan_error("Requête invalide")
+    leftovers = data.get("leftovers")
+    if leftovers is not None:
+        if not isinstance(leftovers, dict) or not set(leftovers) <= set(sched.FORMATS):
+            return _plan_error("Restants invalides")
+        if any(_bag_count(v) is None for v in leftovers.values()):
+            return _plan_error("Restants invalides")
+    with get_conn() as conn:
+        stock.save_closing(conn, today_local().strftime("%Y-%m-%d"), leftovers, now_local())
+    return jsonify({"status": "success"})
 
 
 # A saved plan is flagged when the recommendation has since moved by at

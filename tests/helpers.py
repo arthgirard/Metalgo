@@ -36,3 +36,11 @@ def _seed_sales(app_module, days=40, end=date(2026, 9, 30)):
                 _insert(app_module, f"{d} 15:30:00", "2kg")
             seeded += 1
         d -= timedelta(days=1)
+
+
+def _train_as_of(app_module, monkeypatch, now, days=30):
+    """Seed `days` of history ending the day before `now` and fit a model as of `now`."""
+    import train_model
+    monkeypatch.setattr(train_model, "now_local", lambda: now)
+    _seed_sales(app_module, days=days, end=(now - timedelta(days=1)).date())
+    train_model.train_model(app_module.DB_NAME, app_module.MODEL_PATH)

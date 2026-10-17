@@ -57,3 +57,31 @@ def test_trial_candidates_run(app_module, backtest):
         assert out[name][0]["mae"]["all"] == pytest.approx(out["blend"][0]["mae"]["all"], abs=0.5)
     # No weather_log readings in the seeded data: nothing to test temperature on.
     assert out["blend+temperature"][0] is None
+
+
+def test_intraday_mode_scores_both_corrections_at_each_cut(app_module, backtest):
+    _seed(app_module)
+    out = backtest.run_intraday(app_module.DB_NAME, test_days=5, cut_hours=(12, 14))
+    assert set(out) == {"none", "customers"}
+    for name in out:
+        assert set(out[name]) == {12, 14}
+        assert set(out[name][12]["mae"]) == {"250g", "1kg", "2kg", "all"}
+        assert out[name][12]["n_days"] == 5
+
+
+def test_intraday_mode_only_sees_sales_before_the_cut(app_module, backtest, monkeypatch):
+    _seed(app_module)
+    import forecast
+    seen = []
+    original = forecast.intraday
+
+    def spy(model, day, now, sold, customers, *args, **kwargs):
+        seen.append((model.as_of, day, now, sold["2kg"]))
+        return original(model, day, now, sold, customers, *args, **kwargs)
+
+    monkeypatch.setattr(forecast, "intraday", spy)
+    backtest.run_intraday(app_module.DB_NAME, test_days=5, cut_hours=(12,))
+    assert seen
+    # The seeded 2kg bag is sold at 15:30, after a 12h cut.
+    assert all(as_of == day and now.hour == 12 and sold_2kg == 0
+               for as_of, day, now, sold_2kg in seen)

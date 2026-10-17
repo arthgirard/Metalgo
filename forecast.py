@@ -327,3 +327,60 @@ def recommend(model, target, fmt, event_factor=1.0, target_sellout=SELLOUT_TARGE
     if mu <= 0:
         return 0
     return quantile(mu, variance(model, fmt, mu), 1 - target_sellout) + 1
+
+
+# ---------------------------------------------------------------------------
+# Intraday
+# ---------------------------------------------------------------------------
+
+# How many expected customers the observed count must out-weigh before the
+# day's pace is trusted. Counted in customers, not bags: one five-bag order
+# swung the old bag-based ratio, and the walk-forward measured that
+# correction making the 14h forecast worse than no correction at all.
+# Walk-forward on data.db (44 days, 2026-10-17), day-total MAE vs no
+# correction 7.30 at 12h / 6.05 at 14h: 10 -> 6.43 / 6.18, 20 -> 6.61 /
+# 6.02, 40 -> 6.93 / 5.95. 40 is the first value no worse than no correction
+# for every format at both cuts (`python backtest.py --intraday 12 14`).
+CUSTOMER_SMOOTHING = 40.0
+RATIO_MIN, RATIO_MAX = 0.5, 2.0
+
+
+def _done_share(profile, now):
+    """Share of the day's bags normally sold before `now`, out-of-hours included."""
+    done = sum(share for hour, share in profile.items() if hour < now.hour)
+    done += profile.get(now.hour, 0.0) * now.minute / 60
+    return min(max(done, 0.0), 1.0)
+
+
+def intraday(model, day, now, sold, customers_so_far, mean_kwargs=None,
+             smoothing=CUSTOMER_SMOOTHING):
+    """
+    The day's total per format given what has sold by `now`.
+
+    The rest of the day is the model's expectation for the hours left, scaled
+    by how busy the day has been so far — measured in customers against the
+    customers expected by now, and trusted more as the day goes on. Returns
+    {"multiplier", "done_share", "formats": {fmt: {"remaining", "point",
+    "low", "high"}}}; low/high are the 10th/90th percentiles.
+    """
+    mean_kwargs = mean_kwargs or {}
+    mu = {fmt: mean(model, day, fmt, **mean_kwargs) for fmt in FORMATS}
+    group = "late" if sched.close_hour(day.weekday()) == sched.CLOSE_HOUR_LATE else "regular"
+    done = _done_share(model.profile[group], now)
+
+    expected_customers = sum(mu.values()) / (model.bags_per_customer or 1.0) * done
+    ratio = (min(max(customers_so_far / expected_customers, RATIO_MIN), RATIO_MAX)
+             if expected_customers > 0.1 else 1.0)
+    confidence = done * expected_customers / (expected_customers + smoothing)
+    multiplier = confidence * ratio + 1 - confidence
+
+    formats = {}
+    for fmt in FORMATS:
+        remaining = mu[fmt] * (1 - done) * multiplier
+        var = variance(model, fmt, remaining)
+        point = sold[fmt] + int(round(remaining))
+        low = sold[fmt] + quantile(remaining, var, 0.10)
+        high = sold[fmt] + quantile(remaining, var, 0.90)
+        formats[fmt] = {"remaining": float(remaining), "point": point,
+                        "low": min(low, point), "high": max(high, point)}
+    return {"multiplier": multiplier, "done_share": done, "formats": formats}

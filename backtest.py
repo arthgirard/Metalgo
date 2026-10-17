@@ -21,11 +21,16 @@ that really happened, so true demand on those days was higher than the
 sales the harness compares against.
 
     python backtest.py [--db data.db] [--days 44] [--horizons 0 1 2] [--trials]
+    python backtest.py --intraday 12 14
+
+`--intraday` scores the same-day forecast instead: at each cut hour, the
+model fitted before the day is given the sales and customers logged before
+the cut, with and without the customer-pace correction.
 """
 
 import argparse
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
@@ -184,6 +189,55 @@ def run(db_path, test_days=44, horizons=(0, 1, 2), candidates=CANDIDATES):
     return results
 
 
+INTRADAY_CORRECTIONS = {"none": float("inf"), "customers": forecast.CUSTOMER_SMOOTHING}
+
+
+def run_intraday(db_path, test_days=44, cut_hours=(12, 14)):
+    """{correction: {cut_hour: {"mae", "n_days"}}}; "none" trusts the day's pace not at all."""
+    conn = _open_ro(db_path)
+    try:
+        before = today_local()
+        daily = history.load_daily_sales(conn, before)
+        baskets = history.load_baskets(conn, before)
+        profile = history.hourly_profile(conn, before)
+        rows = history._load_rows(conn, before)
+    finally:
+        conn.close()
+    rows = rows.assign(basket=history._group_baskets(rows))
+
+    records = {name: {cut: [] for cut in cut_hours} for name in INTRADAY_CORRECTIONS}
+    for row in daily.tail(test_days).itertuples(index=False):
+        target = row.date
+        model = forecast.fit(daily, baskets, profile, target)
+        if model is None:
+            continue
+        actual = {fmt: int(getattr(row, f"_{FORMATS.index(fmt) + 2}")) for fmt in FORMATS}
+        day_rows = rows[rows["date"] == target]
+        for cut in cut_hours:
+            now = datetime.combine(target, time(cut))
+            seen = day_rows[day_rows["ts"] < now]
+            sold = {fmt: int((seen["detail"] == fmt).sum()) for fmt in FORMATS}
+            for name, smoothing in INTRADAY_CORRECTIONS.items():
+                out = forecast.intraday(model, target, now, sold, int(seen["basket"].nunique()),
+                                        smoothing=smoothing)
+                pred = {fmt: {"mean": f["point"], "recommended": f["point"]}
+                        for fmt, f in out["formats"].items()}
+                records[name][cut].append((actual, pred))
+    return {name: {cut: _summarise(recs, with_spread=False) for cut, recs in by_cut.items()}
+            for name, by_cut in records.items()}
+
+
+def _print_intraday(results):
+    print(f"{'correction':12s} {'cut':>4s} {'250g':>6s} {'1kg':>6s} {'2kg':>6s} {'all':>6s} {'days':>5s}")
+    for name, by_cut in results.items():
+        for cut, r in by_cut.items():
+            if r is None:
+                print(f"{name:12s} {cut:3d}h (not enough history)")
+                continue
+            print(f"{name:12s} {cut:3d}h {r['mae']['250g']:6.2f} {r['mae']['1kg']:6.2f} "
+                  f"{r['mae']['2kg']:6.2f} {r['mae']['all']:6.2f} {r['n_days']:5d}")
+
+
 def _print(results):
     horizons = sorted({h for by_h in results.values() for h in by_h})
     for h in horizons:
@@ -210,7 +264,12 @@ def main(argv=None):
     parser.add_argument("--horizons", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--trials", action="store_true",
                         help="also score the event, NHL, weather and temperature trials")
+    parser.add_argument("--intraday", type=int, nargs="+", metavar="HOUR",
+                        help="score the same-day forecast at these cut hours instead")
     args = parser.parse_args(argv)
+    if args.intraday:
+        _print_intraday(run_intraday(args.db, test_days=args.days, cut_hours=tuple(args.intraday)))
+        return
     candidates = CANDIDATES + (TRIALS if args.trials else ())
     _print(run(args.db, test_days=args.days, horizons=tuple(args.horizons),
                candidates=candidates))

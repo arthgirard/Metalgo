@@ -1,5 +1,5 @@
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pandas as pd
 import pytest
@@ -286,3 +286,53 @@ class TestCensoring:
         with_censoring, as_of = _fit(daily, censored=censored)
         saturday = as_of + timedelta(days=(5 - as_of.weekday()) % 7)
         assert forecast.mean(with_censoring, saturday, "1kg") == pytest.approx(25, rel=0.03)
+
+
+class TestIntraday:
+    """The live view: sold so far plus what the rest of the day should bring."""
+
+    @staticmethod
+    def _model():
+        daily = _daily(START, 30, {"250g": 42, "1kg": 28, "2kg": 0})
+        model, d = _fit(daily)
+        while d.weekday() in (3, 4, 0):           # a regular-close day
+            d += timedelta(days=1)
+        return model, d
+
+    def test_before_opening_the_whole_day_is_ahead(self):
+        model, d = self._model()
+        out = forecast.intraday(model, d, datetime.combine(d, time(9, 0)),
+                                {"250g": 0, "1kg": 0, "2kg": 0}, customers_so_far=0)
+        assert out["done_share"] == 0
+        assert out["formats"]["250g"]["point"] == round(forecast.mean(model, d, "250g"))
+
+    def test_band_narrows_through_the_day(self):
+        model, d = self._model()
+        sold = {"250g": 6, "1kg": 4, "2kg": 0}
+        morning = forecast.intraday(model, d, datetime.combine(d, time(11, 0)), sold, 10)
+        sold = {"250g": 30, "1kg": 20, "2kg": 0}
+        afternoon = forecast.intraday(model, d, datetime.combine(d, time(15, 0)), sold, 50)
+        width = lambda o: o["formats"]["250g"]["high"] - o["formats"]["250g"]["low"]
+        assert width(morning) > width(afternoon)
+
+    def test_busy_morning_raises_the_rest_of_the_day(self):
+        model, d = self._model()
+        noon = datetime.combine(d, time(13, 0))
+        normal = forecast.intraday(model, d, noon, {"250g": 18, "1kg": 12, "2kg": 0}, 30)
+        busy = forecast.intraday(model, d, noon, {"250g": 36, "1kg": 24, "2kg": 0}, 60)
+        assert busy["multiplier"] > normal["multiplier"]
+        assert busy["formats"]["1kg"]["remaining"] > normal["formats"]["1kg"]["remaining"]
+
+    def test_never_below_what_is_sold_and_point_inside_band(self):
+        model, d = self._model()
+        out = forecast.intraday(model, d, datetime.combine(d, time(16, 30)),
+                                {"250g": 50, "1kg": 1, "2kg": 0}, 40)
+        for fmt, f in out["formats"].items():
+            assert f["low"] <= f["point"] <= f["high"]
+        assert out["formats"]["250g"]["low"] >= 50
+
+    def test_after_closing_nothing_is_left(self):
+        model, d = self._model()
+        out = forecast.intraday(model, d, datetime.combine(d, time(18, 30)),
+                                {"250g": 40, "1kg": 25, "2kg": 0}, 50)
+        assert out["formats"]["250g"] == {"remaining": 0.0, "point": 40, "low": 40, "high": 40}
