@@ -94,3 +94,15 @@ def test_a_fit_within_noise_of_the_baseline_is_still_saved(app_module, trainer, 
     monkeypatch.setattr(trainer, "_light_gate",
                         lambda *a, **k: {"mae": 10.85, "baseline_mae": 10.37, "n_days": 14})
     assert _train(app_module, trainer)["status"] == "ok"
+
+
+def test_command_line_run_honours_the_app_environment(app_module, trainer, monkeypatch, tmp_path):
+    """`python train_model.py` must train the database the app is pointed at,
+    not whatever data.db sits in the working directory."""
+    target = tmp_path / "elsewhere.pkl"
+    monkeypatch.setenv("METALGO_DB", app_module.DB_NAME)
+    monkeypatch.setenv("METALGO_MODEL", str(target))
+    monkeypatch.chdir(tmp_path)
+    trainer.main()
+    assert joblib.load(target)["version"] == 2
+    assert not (tmp_path / "data.db").exists() and not (tmp_path / "model.pkl").exists()

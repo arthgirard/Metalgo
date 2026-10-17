@@ -241,5 +241,11 @@ def _record_forecasts(db_name, model, now):
         conn.close()
 
 
+def main():
+    """Command-line run, pointed at the same files as the app (METALGO_DB / METALGO_MODEL)."""
+    return train_model(os.environ.get("METALGO_DB", DB_NAME),
+                       os.environ.get("METALGO_MODEL", MODEL_PATH))
+
+
 if __name__ == "__main__":
-    train_model()
+    main()
