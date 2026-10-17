@@ -42,6 +42,12 @@ def test_each_day_carries_a_recommendation_above_the_expected(client, fitted):
     assert day["plan"] is None and day["changement"] is None
 
 
+def test_each_day_states_the_sellout_target_behind_the_recommendation(client, fitted):
+    import forecast
+    assert all(d["cible_rupture"] == forecast.SELLOUT_TARGET == 0.10
+               for d in client.get('/api/plan').get_json())
+
+
 def test_saving_a_plan_two_days_ahead(client, fitted):
     r = client.post('/api/plan', json={"date": "2026-10-24", "bags": BAGS})
     assert r.status_code == 200

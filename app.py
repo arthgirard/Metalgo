@@ -579,6 +579,9 @@ def get_plan():
                 "evenement": get_special_event(day, db_path=DB_NAME)[0],
                 "attendu": expected,
                 "recommande": recommended,
+                # The risk the recommendation is built to, shown on the card
+                # so the planner knows what "Recommandé" promises.
+                "cible_rupture": forecast.SELLOUT_TARGET,
                 "plan": plan["bags"] if plan else None,
                 "plan_maj": plan["updated_at"] if plan else None,
                 "changement": _changed(plan["recommended"], recommended) if plan else None,

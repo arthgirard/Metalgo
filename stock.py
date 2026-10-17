@@ -162,10 +162,12 @@ def available(plan, conversions):
     return out
 
 
-def format_status(plan, conversions, times, closed):
+def format_status(plan, conversions, times, closed, leftovers=None):
     """
     Per format: available, sold, remaining, and — once the day is closed —
-    whether it sold out ("sold_out" / "incoherent" / "ok").
+    whether it sold out ("sold_out" / "incoherent" / "ok"). "incoherent" is
+    reported as soon as it happens, so the counter can say so during the day.
+    `leftovers` are the bags counted at closing, where staff typed them.
     """
     stock = available(plan, conversions)
     out = {}
@@ -174,19 +176,24 @@ def format_status(plan, conversions, times, closed):
         sold = len(sold_times)
         entry = {"available": stock[fmt], "sold": sold, "remaining": stock[fmt] - sold,
                  "status": None, "sold_out_at": None}
-        if closed:
-            entry["status"] = _sellout(fmt, stock[fmt], sold_times, times, entry)
+        if sold > stock[fmt]:
+            # More sold than was ever there: early orders bagged separately,
+            # yesterday's leftovers sold first, or a plan nobody corrected.
+            entry["status"] = "incoherent"
+        elif closed:
+            left = (leftovers or {}).get(fmt)
+            entry["status"] = _sellout(fmt, stock[fmt], sold_times, times, entry, left)
         out[fmt] = entry
     return out
 
 
-def _sellout(fmt, stock, sold_times, times, entry):
+def _sellout(fmt, stock, sold_times, times, entry, left=None):
     sold = len(sold_times)
-    if sold > stock:
-        # More sold than was ever there: early orders bagged separately,
-        # yesterday's leftovers sold first, or a plan nobody corrected.
-        return "incoherent"
     if sold < stock - SELLOUT_TOLERANCE:
+        return "ok"
+    if left is not None and left >= 1:
+        # The tolerance is for a bag nobody counted; a bag someone did count
+        # on the shelf at closing means the format never ran out.
         return "ok"
     if not sold_times:
         # Planned at zero: sold out before opening. One bag left unsold is
@@ -206,8 +213,9 @@ def day_status(conn, day):
     if plan is None:
         return None
     times = history.sales_times(conn, datetime.strptime(day, "%Y-%m-%d").date())
-    return format_status(plan, get_conversions(conn, day), times,
-                         closed=get_closing(conn, day) is not None)
+    closing = get_closing(conn, day)
+    return format_status(plan, get_conversions(conn, day), times, closed=closing is not None,
+                         leftovers=(closing or {}).get("leftovers"))
 
 
 def confirmed_sellouts(conn, before):

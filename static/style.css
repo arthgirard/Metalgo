@@ -178,6 +178,7 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 .plan-note { font-size: 0.8rem; font-weight: 600; margin-top: 12px; }
 .plan-note.warn { color: var(--brand-accent); }
 .plan-note.muted { color: var(--text-muted); }
+.plan-intro { margin: 0 0 4px; text-align: center; }
 .plan-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; gap: 12px; }
 .plan-status { font-size: 0.8rem; font-weight: 700; color: var(--fmt-1kg); }
 .plan-error { font-size: 0.8rem; font-weight: 600; color: var(--danger); margin-top: 8px; }

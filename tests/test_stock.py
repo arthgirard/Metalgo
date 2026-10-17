@@ -74,6 +74,32 @@ class TestFormatStatus:
                                  closed=True)
         assert st["2kg"]["status"] == "ok"
 
+    def test_a_leftover_typed_at_closing_vetoes_the_sellout(self, stock):
+        times = _times(kg2=["11:00", "12:00"], kg1=["14:00", "15:00", "16:00"])
+        st = stock.format_status(PLAN, [], times, closed=True, leftovers={"2kg": 1})
+        assert st["2kg"]["status"] == "ok" and st["2kg"]["sold_out_at"] is None
+
+    def test_a_leftover_of_zero_keeps_the_sellout(self, stock):
+        times = _times(kg2=["11:00", "12:00"], kg1=["14:00", "15:00", "16:00"])
+        st = stock.format_status(PLAN, [], times, closed=True, leftovers={"2kg": 0})
+        assert st["2kg"]["status"] == "sold_out"
+
+    def test_closing_leftovers_reach_day_status(self, app_module, stock):
+        for stamp in ("11:00", "12:00"):
+            _insert(app_module, f"2026-10-15 {stamp}:00", "2kg")
+        for stamp in ("14:00", "15:00", "16:00"):
+            _insert(app_module, f"2026-10-15 {stamp}:00", "1kg")
+        with app_module.get_conn() as conn:
+            stock.save_plan(conn, "2026-10-15", PLAN, None, NOW)
+            stock.save_closing(conn, "2026-10-15", {"250g": None, "1kg": None, "2kg": 1}, NOW)
+            assert stock.day_status(conn, "2026-10-15")["2kg"]["status"] == "ok"
+            assert stock.confirmed_sellouts(conn, date(2026, 10, 16)) == {}
+
+    def test_sales_beyond_stock_are_flagged_before_closing(self, stock):
+        times = _times(g250=["11:00"] * 12)
+        st = stock.format_status(PLAN, [], times, closed=False)
+        assert st["250g"]["status"] == "incoherent" and st["1kg"]["status"] is None
+
     def test_no_closing_record_means_no_status_but_live_stock(self, stock):
         times = _times(g250=["11:00"] * 6)
         st = stock.format_status(PLAN, [], times, closed=False)

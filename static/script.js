@@ -538,7 +538,13 @@ function loadPlan() {
                     '<div class="model-status-text" style="text-align:center;">Données indisponibles.</div>';
                 return;
             }
-            container.innerHTML = data.map(planCard).join('');
+            // 0.10 reads as "un jour sur 10": the planner's terms, not a percentage.
+            const target = Number(data[0].cible_rupture);
+            const intro = target > 0
+                ? `<div class="plan-note muted plan-intro">Recommandé : rupture au plus un jour sur ` +
+                  `${esc(Math.round(1 / target))}.</div>`
+                : '';
+            container.innerHTML = intro + data.map(planCard).join('');
         })
         .catch(() => {
             if (loading) loading.style.display = 'none';
