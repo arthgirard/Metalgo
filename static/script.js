@@ -237,9 +237,8 @@ function renderPrediction(data) {
     const eventBanner = el('event-banner');
 
     if (el('time-left')) {
-        const closed = data.debug_info === 'Fermé';
-        setText('time-left', closed ? 'Fermé' :
-            (data.heures_restantes !== undefined ? `encore ${data.heures_restantes} h` : ''));
+        setText('time-left', data.heures_restantes !== undefined ? data.heures_restantes : '--');
+        setText('meteo-label', data.meteo || '--');
     }
 
     if (eventBanner) {
@@ -252,23 +251,36 @@ function renderPrediction(data) {
     }
 
     if (data.previsions && el('pred-250g')) {
-        // One line under each number: what should be left at closing when
-        // there is a plan for today, otherwise the likely range.
         FORMATS.forEach(fmt => {
-            setText(`pred-${fmt}`, data.previsions[fmt] || 0);
-            const sub = el(`sub-${fmt}`);
-            const end = (data.stock_fin_prevu || {})[fmt];
             const low = (data.previsions_min || {})[fmt];
             const high = (data.previsions_max || {})[fmt];
-            sub.classList.toggle('stock-out', end !== undefined && end < 0);
-            if (end !== undefined) {
-                sub.textContent = end < 0 ? `manque ${-end}` : `reste ≈ ${end}`;
-            } else {
-                sub.textContent = (low === undefined || high === undefined) ? '' : `${low} – ${high}`;
-            }
+
+            setText(`pred-${fmt}`, data.previsions[fmt] || 0);
+            // Spread across the forest's trees: computed server-side all
+            // along, discarded by the old UI.
+            setText(`range-${fmt}`,
+                (low === undefined || high === undefined) ? '' : `${low} – ${high}`);
         });
     }
 
+    const endStock = el('end-stock');
+    if (endStock) {
+        if (data.stock_fin_prevu) {
+            el('end-stock-row').innerHTML = FORMATS.map(fmt => {
+                // Negative means the rest of the day should ask for more bags
+                // than are left: shown as the shortfall, not as "-14".
+                const n = data.stock_fin_prevu[fmt];
+                const value = n < 0 ? `rupture (manque ${esc(-n)})` : esc(n);
+                return `<span class="${n <= 0 ? 'stock-out' : FORMAT_CLASSES[fmt]}">` +
+                       `${esc(FORMAT_LABELS[fmt])} : ${value}</span>`;
+            }).join('');
+            endStock.style.display = 'block';
+        } else {
+            endStock.style.display = 'none';
+        }
+    }
+
+    setText('prediction-info', data.debug_info || 'Modèle prêt');
     renderTrend(data.debug_info);
 }
 

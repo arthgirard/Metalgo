@@ -134,6 +134,10 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 
 .align-right { text-align: right; }
 
+.context-banner { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border-soft); padding-bottom: 16px; margin-bottom: 16px; }
+.context-data { display: flex; flex-direction: column; }
+.context-lbl { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-bottom: 4px; }
+.context-val { font-size: 1.1rem; font-weight: 700; color: var(--text-main); }
 .trend-badge { text-align: center; padding: 8px; border-radius: 8px; font-size: 0.85rem; font-weight: 700; margin-bottom: 16px; }
 .trend-badge.up { background: #FFF7ED; color: #C2410C; }
 .trend-badge.down { background: #EFF6FF; color: #1D4ED8; }
@@ -147,6 +151,9 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
    Sits directly under the figure it qualifies, above the format label. */
 .pred-range { font-size: 0.7rem; color: var(--range-text); font-weight: 600; margin-top: 3px; }
 
+.model-card { display: flex; justify-content: space-between; align-items: center; margin-top: 24px; padding: 12px 16px; background: var(--bg-app); border-radius: 12px; border: 1px solid var(--border-soft); gap: 16px; }
+.model-info { display: flex; flex-direction: column; text-align: left; min-width: 0; flex: 1; }
+.model-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-bottom: 2px; }
 .model-status-text { font-size: 0.85rem; font-weight: 700; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .btn-utility { background: white; border: 1px solid var(--border-soft); color: var(--text-muted); font-size: 0.75rem; font-weight: 600; padding: 8px 12px; border-radius: 8px; cursor: pointer; transition: 0.2s; flex-shrink: 0; }
 .btn-utility:active { background: var(--bg-app); }
@@ -228,9 +235,7 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 .leftover-grid .sheet-input { width: 100%; }
 .btn-primary { background: var(--brand-action); color: white; border-color: var(--brand-action); }
 
-/* Aujourd'hui */
-.today-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
-.today-left { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); }
-.today-foot { display: flex; justify-content: center; margin-top: 16px; }
-.btn-link { background: none; border: none; color: var(--text-muted); font-size: 0.75rem; font-weight: 600; text-decoration: underline; cursor: pointer; padding: 4px 8px; }
 .sheet-optional { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); margin-left: 6px; }
+.end-stock { margin-top: 16px; text-align: center; }
+.end-stock-title { display: block; font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-bottom: 6px; }
+.end-stock-row { display: flex; justify-content: center; gap: 16px; font-size: 0.9rem; font-weight: 700; flex-wrap: wrap; }
