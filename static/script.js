@@ -237,8 +237,9 @@ function renderPrediction(data) {
     const eventBanner = el('event-banner');
 
     if (el('time-left')) {
-        setText('time-left', data.heures_restantes !== undefined ? data.heures_restantes : '--');
-        setText('meteo-label', data.meteo || '--');
+        const closed = data.debug_info === 'Fermé';
+        setText('time-left', closed ? 'Fermé' :
+            (data.heures_restantes !== undefined ? `encore ${data.heures_restantes} h` : ''));
     }
 
     if (eventBanner) {
@@ -251,36 +252,23 @@ function renderPrediction(data) {
     }
 
     if (data.previsions && el('pred-250g')) {
+        // One line under each number: what should be left at closing when
+        // there is a plan for today, otherwise the likely range.
         FORMATS.forEach(fmt => {
+            setText(`pred-${fmt}`, data.previsions[fmt] || 0);
+            const sub = el(`sub-${fmt}`);
+            const end = (data.stock_fin_prevu || {})[fmt];
             const low = (data.previsions_min || {})[fmt];
             const high = (data.previsions_max || {})[fmt];
-
-            setText(`pred-${fmt}`, data.previsions[fmt] || 0);
-            // Spread across the forest's trees: computed server-side all
-            // along, discarded by the old UI.
-            setText(`range-${fmt}`,
-                (low === undefined || high === undefined) ? '' : `${low} – ${high}`);
+            sub.classList.toggle('stock-out', end !== undefined && end < 0);
+            if (end !== undefined) {
+                sub.textContent = end < 0 ? `manque ${-end}` : `reste ≈ ${end}`;
+            } else {
+                sub.textContent = (low === undefined || high === undefined) ? '' : `${low} – ${high}`;
+            }
         });
     }
 
-    const endStock = el('end-stock');
-    if (endStock) {
-        if (data.stock_fin_prevu) {
-            el('end-stock-row').innerHTML = FORMATS.map(fmt => {
-                // Negative means the rest of the day should ask for more bags
-                // than are left: shown as the shortfall, not as "-14".
-                const n = data.stock_fin_prevu[fmt];
-                const value = n < 0 ? `rupture (manque ${esc(-n)})` : esc(n);
-                return `<span class="${n <= 0 ? 'stock-out' : FORMAT_CLASSES[fmt]}">` +
-                       `${esc(FORMAT_LABELS[fmt])} : ${value}</span>`;
-            }).join('');
-            endStock.style.display = 'block';
-        } else {
-            endStock.style.display = 'none';
-        }
-    }
-
-    setText('prediction-info', data.debug_info || 'Modèle prêt');
     renderTrend(data.debug_info);
 }
 
@@ -337,13 +325,12 @@ function updateStock() {
         .then(res => res.json())
         .then(data => {
             stockData = data;
-            if (!data.plan) {
-                strip.innerHTML = '<div class="hist-empty">Aucun plan pour aujourd\'hui</div>';
-                return;
-            }
-            strip.innerHTML = `<div class="week-data">${
-                FORMATS.map(fmt => stockCell(fmt, data.formats[fmt] || {})).join('')}</div>`;
+            // The sheet first: repacks and the closing are recorded whether
+            // or not anyone entered a plan this morning.
             if (el('closing-sheet').style.display !== 'none') renderClosing();
+            strip.innerHTML = data.plan
+                ? `<div class="week-data">${FORMATS.map(fmt => stockCell(fmt, data.formats[fmt] || {})).join('')}</div>`
+                : '<div class="hist-empty">Aucun plan pour aujourd\'hui</div>';
         })
         .catch(err => console.error(err));
 }
@@ -538,13 +525,19 @@ function loadPlan() {
                     '<div class="model-status-text" style="text-align:center;">Données indisponibles.</div>';
                 return;
             }
-            // 0.10 reads as "un jour sur 10": the planner's terms, not a percentage.
+            // 0.10 reads as "1 jour sur 10": the planner's terms, not a percentage.
             const target = Number(data[0].cible_rupture);
             const intro = target > 0
-                ? `<div class="plan-note muted plan-intro">Recommandé : rupture au plus un jour sur ` +
-                  `${esc(Math.round(1 / target))}.</div>`
+                ? `<div class="plan-intro">Recommandé pour manquer au plus 1 jour sur ${esc(Math.round(1 / target))}</div>`
                 : '';
-            container.innerHTML = intro + data.map(planCard).join('');
+            const heads = FORMATS.map(fmt =>
+                `<span class="${FORMAT_CLASSES[fmt]}">${esc(FORMAT_LABELS[fmt])}</span>`).join('');
+            container.innerHTML = intro + `<div class="plan-heads"><span></span>${heads}</div>` +
+                data.map(planCard).join('');
+            container.querySelectorAll('.plan-input').forEach(recHint);
+            container.oninput = event => {
+                if (event.target.classList.contains('plan-input')) markEdited(event.target);
+            };
         })
         .catch(() => {
             if (loading) loading.style.display = 'none';
@@ -554,53 +547,64 @@ function loadPlan() {
 }
 
 function savedLabel(stamp) {
-    return stamp ? `Enregistré · ${esc(stamp.slice(11, 16))}` : '';
+    return stamp ? `✓ ${esc(stamp.slice(11, 16))}` : '✓';
 }
 
+// Last week's same day, as the planner used to read it off paper: only what
+// happened that the numbers alone would not show.
 function lastWeekLine(week) {
     if (!week) return '';
     const parts = (week.conversions || []).map(c =>
-        `${esc(c.source_bags)} × ${esc(c.source)} → ${esc(c.target)}`);
+        `${esc(c.source_bags)}×${esc(c.source)}→${esc(c.target)}`);
     (week.ruptures || []).forEach(fmt => parts.push(`rupture ${esc(fmt)}`));
     (week.incoherent || []).forEach(fmt => parts.push(`${esc(fmt)} incohérent`));
-    return parts.length ? `<div class="plan-note muted">Sem. dernière : ${parts.join(' · ')}</div>` : '';
+    return parts.length ? `<div class="plan-note">Sem. dern. : ${parts.join(' · ')}</div>` : '';
 }
 
-function changeLine(day) {
-    if (!day.changement || !day.plan) return '';
-    const parts = Object.keys(day.changement).map(fmt =>
-        `${esc(FORMAT_LABELS[fmt] || fmt)} ${esc(day.changement[fmt])} (au lieu de ${esc(day.plan[fmt])})`);
-    return `<div class="plan-note warn">Nouvelle recommandation : ${parts.join(', ')}</div>`;
+// The recommendation only shows when the box says something else: typed
+// over, or saved before the recommendation moved (then in orange).
+function recHint(input) {
+    const rec = input.dataset.rec;
+    const hint = input.nextElementSibling;
+    if (rec === '' || String(input.value).trim() === rec) {
+        hint.textContent = '';
+        return;
+    }
+    hint.textContent = `reco ${rec}`;
+    hint.classList.toggle('moved', input.dataset.moved === '1');
+}
+
+function markEdited(input) {
+    input.closest('.plan-card').classList.add('edited');
+    recHint(input);
 }
 
 function planCard(day) {
     const saved = day.plan !== null && day.plan !== undefined;
-    const cols = FORMATS.map(fmt => {
+    const moved = day.changement || {};
+    const cells = FORMATS.map(fmt => {
         const rec = (day.recommande || {})[fmt];
-        const expected = (day.attendu || {})[fmt];
         const value = saved ? day.plan[fmt] : (rec === undefined ? '' : rec);
-        return `<div class="w-col">
-            <span class="l">${esc(FORMAT_LABELS[fmt])}</span>
+        return `<div class="plan-cell">
             <input class="plan-input ${FORMAT_CLASSES[fmt]}" type="number" inputmode="numeric"
-                   min="0" max="999" step="1" data-format="${esc(fmt)}" value="${esc(value)}">
-            <span class="plan-rec">Recommandé ${esc(rec === undefined ? '–' : rec)}</span>
-            <span class="plan-exp">${expected === undefined ? '' : `attendu ≈ ${esc(Math.round(expected))}`}</span>
+                   min="0" max="999" step="1" aria-label="${esc(FORMAT_LABELS[fmt])}"
+                   data-format="${esc(fmt)}" data-rec="${esc(rec === undefined ? '' : rec)}"
+                   data-moved="${fmt in moved ? 1 : 0}" value="${esc(value)}">
+            <span class="plan-hint"></span>
         </div>`;
     }).join('');
-    const meta = [day.meteo, day.evenement].filter(Boolean).map(esc).join(' · ');
+    const event = day.evenement ? `<span class="plan-event">${esc(day.evenement)}</span>` : '';
 
     return `<div class="week-card plan-card${saved ? ' saved' : ''}" data-date="${esc(day.date)}">
-        <div class="week-header">
-            <span class="week-date">${esc(day.date_affichee)}</span>
-            <span class="week-meteo">${meta}</span>
+        <div class="plan-row">
+            <div class="plan-day">
+                <span class="week-date">${esc(day.date_affichee)}</span>${event}
+                <span class="plan-status">${saved ? savedLabel(day.plan_maj) : ''}</span>
+                <button class="btn-utility plan-save" onclick="savePlan('${esc(day.date)}')">Enregistrer</button>
+            </div>
+            ${cells}
         </div>
-        <div class="week-data">${cols}</div>
-        ${changeLine(day)}
         ${lastWeekLine(day.semaine_derniere)}
-        <div class="plan-actions">
-            <span class="plan-status">${savedLabel(day.plan_maj)}</span>
-            <button class="btn-utility" onclick="savePlan('${esc(day.date)}')">Enregistrer</button>
-        </div>
         <div class="plan-error" style="display: none;"></div>
     </div>`;
 }
@@ -631,9 +635,13 @@ function savePlan(date) {
             }
             error.style.display = 'none';
             card.classList.add('saved');
+            card.classList.remove('edited');
             card.querySelector('.plan-status').innerHTML = savedLabel(body.plan_maj || localStamp(new Date()));
-            const warn = card.querySelector('.plan-note.warn');
-            if (warn) warn.remove();
+            // Saved now against the current recommendation: no longer "moved".
+            card.querySelectorAll('.plan-input').forEach(input => {
+                input.dataset.moved = '0';
+                recHint(input);
+            });
         })
         .catch(() => {
             error.textContent = 'Connexion impossible, réessayez.';

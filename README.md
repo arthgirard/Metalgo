@@ -4,13 +4,13 @@
 
 It is designed to solve a specific challenge in fresh cheese curd production: curds are bagged once, in the morning, in three formats (250g, 1kg, 2kg), and nothing is bagged later in the day. Metalgo recommends how many bags of each format to prepare, records what was really bagged, and learns from the days that sold out.
 
-Staff log each bag sold with one press of a USB button by the register. Those presses, the morning plans and the end-of-day closings are all the data the forecast needs.
+Staff log each bag sold with one press of a USB button by the register. Those presses and the morning plans are all the data the forecast needs; the end-of-day closing is optional.
 
 ## 🚀 Key Features
 
 * **Real-Time Dashboard:** Live tracking of sales volume, peak hours, and total mass.
 * **Morning bagging plan:** For today and the next seven calendar days (closed days skipped), a recommended number of bags per format, chosen so a format runs out on about one day in ten. The planner can fill in several days ahead (a whole weekend on Thursday); the bags typed in are saved as the day's plan, and a later change in the recommendation is flagged without overwriting it.
-* **Counter stock and closing:** The Saisie tab shows the bags left of each format. At the end of the day, the **Clôture** sheet records repacked bags (2kg → 250g, 2kg → 1kg, 1kg → 250g) and optional leftovers. A closed day with a plan tells a real sell-out apart from a quiet afternoon.
+* **Counter stock and closing:** The Saisie tab shows the bags left of each format. The optional **Clôture** sheet records repacked bags (2kg → 250g, 2kg → 1kg, 1kg → 250g) and leftovers. A day with a plan is enough to tell a real sell-out apart from a quiet afternoon; a forgotten closing only loses the leftover check.
 * **Same-day forecast:** The Aujourd'hui view shows the day's expected total per format, adjusted to how many customers have come in so far, and the stock expected to be left at closing.
 * **Context Awareness:**
     * **Weather Integration:** Fetches current conditions, an hour-by-hour curve for today, and a 7-day outlook (via Open-Meteo). Weather is also sampled on a timer while the shop is open, independently of whether anything sells.
@@ -70,9 +70,11 @@ model: what matters is the number of bags to prepare each morning.
   *reaches* the stock is at most 10% (`SELLOUT_TARGET`). Leftovers are
   sold the next morning or reground, so the target leans towards having
   enough.
-* **Sell-outs.** A day with a plan and a closing record where a format's
-  sales reached its stock (within one bag) while other formats kept selling
-  is a confirmed sell-out. Its sales understate demand, so once a format has
+* **Sell-outs.** Once a day with a plan is over, a format whose sales
+  reached its stock (within one bag) while other formats kept selling is a
+  sell-out, closing record or not. A leftover typed at closing vetoes it,
+  and sales beyond the stock (an unrecorded repack, early plant orders) mark
+  the day incoherent rather than sold out. Its sales understate demand, so once a format has
   at least 5 such days (`CENSOR_MIN_DAYS`) they are replaced by the expected
   demand given that it reached the stock.
 * **Switched off on measurement.** NHL games, weather and temperature are
@@ -116,8 +118,8 @@ On the history as of 2026-10-17, the day-total error at D+0 / D+1 / D+2 is
 11.27 / 11.44 / 11.60 bags, against 12.27 / 12.27 / 12.20 for the retired
 random forest and 12.21 for the same-weekday mean. Sell-outs at the
 recommendation run at 10–11%. That rate is measured on history that is
-itself cut short by real sell-outs, so it is optimistic until closings
-accumulate.
+itself cut short by real sell-outs, so it is optimistic until planned
+days accumulate.
 
 ## 🧪 Tests
 
@@ -150,8 +152,8 @@ model use Python's (Monday = 0), while SQL queries read SQLite's
 
 Planning and closing live in four tables created at startup (`stock.py`):
 `bagging_plan` (bags per format per date, often saved days ahead),
-`conversions` (bags opened and repacked), `closing_record` (end-of-day
-confirmation and optional leftovers) and `forecast_log` (every nightly
+`conversions` (bags opened and repacked), `closing_record` (optional
+end-of-day leftovers) and `forecast_log` (every nightly
 recommendation, for later comparison).
 
 ## 📄 License
