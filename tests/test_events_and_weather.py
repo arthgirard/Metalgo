@@ -123,7 +123,8 @@ class TestLearnedMultiplier:
 
     def test_blends_towards_observation(self, tmp_path):
         db = tmp_path / "snap.db"
-        rows = [(f"2026-01-{d:02d}", 6, None, 0, 0, 100, 0, 0) for d in range(1, 5)]
+        # Baseline days within BASELINE_WINDOW_DAYS of the event.
+        rows = [(f"2026-02-{d:02d}", 6, None, 0, 0, 100, 0, 0) for d in range(1, 5)]
         rows.append(("2026-02-14", 6, "fixed_02-14", 0, 0, 200, 0, 0))
         self._make_db(db, rows)
 
@@ -140,7 +141,8 @@ class TestLearnedMultiplier:
         uplift to the Canadiens inflated the factor.
         """
         db = tmp_path / "snap.db"
-        rows = [(f"2026-01-{d:02d}", 6, None, 0, 0, 100, 0, 0) for d in range(1, 5)]
+        rows = [(f"2026-02-{d:02d}", 6, None, 0, 0, 100, 0, 0) for d in range(20, 24)]
+        rows += [(f"2026-06-{d:02d}", 6, None, 0, 0, 100, 0, 0) for d in range(15, 19)]
         # Plain game day at 1.1x, plus a holiday+game day at a wild 3x.
         rows.append(("2026-03-01", 6, None, 1, 0, 110, 0, 0))
         rows.append(("2026-06-24", 6, "fixed_06-24", 1, 0, 300, 0, 0))
@@ -153,6 +155,33 @@ class TestLearnedMultiplier:
         # prior, which stays 1.1. Including the holiday would have pushed the
         # observation to 2.05 and the blend well above 1.1.
         assert result == pytest.approx(1.1, abs=0.001)
+
+
+    def test_baseline_uses_nearby_weeks_only(self, tmp_path):
+        """
+        History mixes a quiet February with a busy July, so an all-year
+        same-weekday baseline read a normal-for-its-season holiday as a dip.
+        Canada Day 2026 sold 39 against a Wednesday average of about 55
+        that was mostly summer.
+        """
+        db = tmp_path / "snap.db"
+        rows = [("2026-06-17", 2, None, 0, 0, 40, 0, 0),
+                ("2026-06-24", 2, None, 0, 0, 40, 0, 0),       # within 21 days
+                ("2026-08-26", 2, None, 0, 0, 90, 0, 0),       # 56 days away: ignored
+                ("2026-07-01", 2, "fixed_07-01", 0, 0, 40, 0, 0)]
+        self._make_db(db, rows)
+        result = event_service._get_learned_multiplier("fixed_07-01", 1.3, str(db))
+        assert result == pytest.approx(0.25 * 1.0 + 0.75 * 1.3, abs=1e-3)
+
+    def test_baseline_must_share_the_weekday(self, tmp_path):
+        db = tmp_path / "snap.db"
+        rows = [("2026-06-27", 5, None, 0, 0, 100, 0, 0),      # a Saturday: other weekday
+                ("2026-07-01", 2, "fixed_07-01", 0, 0, 40, 0, 0)]
+        self._make_db(db, rows)
+        assert event_service._get_learned_multiplier("fixed_07-01", 1.3, str(db)) == 1.3
+
+    def test_window_is_three_weeks(self):
+        assert event_service.BASELINE_WINDOW_DAYS == 21
 
 
 class TestWeatherScoring:

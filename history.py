@@ -12,6 +12,7 @@ from datetime import datetime
 import pandas as pd
 
 import shop_schedule as sched
+from meteo import weather_score_from_label
 
 # A day with fewer than this many sales is treated as a partial/abandoned
 # log rather than a genuinely quiet day, and excluded from fitting.
@@ -131,3 +132,47 @@ def sales_times(conn, day):
     rows = _load_rows(conn, None, day=day)
     return {fmt: [ts.to_pydatetime() for ts in rows.loc[rows["detail"] == fmt, "ts"]]
             for fmt in FORMATS}
+
+
+def daily_weather(conn, before):
+    """
+    {date: {"score", "temperature"}} for days before `before`.
+
+    The timer-sampled `weather_log` wins wherever it has readings inside the
+    day's opening hours: it is not biased towards busy hours the way
+    sale-time labels are. Days that predate the sampler fall back to the
+    modal sale-time label and have no temperature.
+    """
+    cutoff = before.strftime("%Y-%m-%d")
+    out = {}
+
+    labels = pd.read_sql_query(
+        "SELECT date(timestamp) AS day, meteo_summary FROM logs "
+        "WHERE action_type = 'VENTE' AND date(timestamp) < ?", conn, params=(cutoff,))
+    labels["score"] = labels["meteo_summary"].map(weather_score_from_label)
+    for day, scores in labels.dropna(subset=["score"]).groupby("day")["score"]:
+        out[datetime.strptime(day, "%Y-%m-%d").date()] = {
+            "score": int(scores.mode().iloc[0]), "temperature": None}
+
+    try:
+        samples = pd.read_sql_query(
+            "SELECT timestamp, weather_score, temperature FROM weather_log "
+            "WHERE date(timestamp) < ?", conn, params=(cutoff,))
+    except Exception:
+        return out          # older database without the sampler table
+    if samples.empty:
+        return out
+    samples["ts"] = pd.to_datetime(samples["timestamp"], format="mixed")
+    samples["day"] = samples["ts"].dt.date
+    for day, group in samples.groupby("day"):
+        open_rows = group[group["ts"].dt.hour.isin(list(sched.selling_hours_on(day)))]
+        if open_rows.empty:
+            continue
+        scores = open_rows["weather_score"].dropna()
+        temps = open_rows["temperature"].dropna()
+        previous = out.get(day, {"score": None, "temperature": None})
+        out[day] = {
+            "score": int(scores.mode().iloc[0]) if not scores.empty else previous["score"],
+            "temperature": float(temps.mean()) if not temps.empty else None,
+        }
+    return out

@@ -168,3 +168,72 @@ class TestSpread:
         model, _ = _fit(daily, _baskets(daily, size=2))
         assert model.profile == PROFILE
         assert model.bags_per_customer == pytest.approx(2.0, rel=0.05)
+
+
+class TestWeatherAndTemperature:
+    """
+    Optional adjustments. Each is only switched on in the app if the
+    walk-forward harness shows it helps; the switches live in forecast.py.
+    """
+
+    @staticmethod
+    def _rainy_history():
+        rng = random.Random(3)
+        scores = [rng.choice((0, 2, 2, 2)) for _ in range(40)]
+        daily = _daily(START, 40, lambda i: {"250g": 40 if scores[i] else 24,
+                                             "1kg": 25 if scores[i] else 15, "2kg": 3})
+        return daily, dict(zip(daily["date"], scores))
+
+    def test_measured_switches(self):
+        """
+        Set from the walk-forward on 2026-10-17 (last 44 trading days, D+0):
+        blend 11.29, +events 11.27, +events+NHL 11.85, +weather 11.91,
+        +temperature 11.52 bags daily-total MAE. Only events earned a place.
+        """
+        assert forecast.USE_EVENTS is True
+        assert forecast.USE_NHL is False
+        assert forecast.USE_WEATHER is False
+        assert forecast.USE_TEMPERATURE is False
+
+    def test_weather_factor_learns_a_rainy_dip(self):
+        daily, weather = self._rainy_history()
+        model, d = _fit(daily, weather_by_day=weather)
+        assert forecast.mean(model, d, "250g", weather_score=0) < 0.85 * forecast.mean(
+            model, d, "250g", weather_score=2)
+
+    def test_weather_factor_is_shrunk_with_few_days(self):
+        daily = _daily(START, 30, {"250g": 40, "1kg": 25, "2kg": 3})
+        rainy = daily["date"].iloc[5]
+        daily.loc[daily["date"] == rainy, ["250g", "1kg", "total"]] = [20, 12, 35]
+        weather = {d: (0 if d == rainy else 2) for d in daily["date"]}
+        model, d = _fit(daily, weather_by_day=weather)
+        ratio = forecast.mean(model, d, "250g", weather_score=0) / forecast.mean(model, d, "250g")
+        # One rainy day at about half the usual: shrunk by 1 / (1 + 10).
+        assert 0.9 < ratio < 1.0
+
+    def test_no_weather_given_means_no_factor(self):
+        daily = _daily(START, 30, {"250g": 40, "1kg": 25, "2kg": 3})
+        model, d = _fit(daily)
+        assert forecast.mean(model, d, "250g", weather_score=0) == forecast.mean(model, d, "250g")
+
+    def test_temperature_factor_follows_warm_days(self):
+        rng = random.Random(5)
+        temps = [rng.uniform(5, 30) for _ in range(40)]
+        daily = _daily(START, 40, lambda i: {"250g": round(20 + temps[i]), "1kg": 25, "2kg": 3})
+        model, d = _fit(daily, temperature_by_day=dict(zip(daily["date"], temps)))
+        assert forecast.mean(model, d, "250g", temperature=28) > forecast.mean(model, d, "250g", temperature=8)
+
+    def test_unknown_temperature_means_no_factor(self):
+        rng = random.Random(5)
+        temps = [rng.uniform(5, 30) for _ in range(40)]
+        daily = _daily(START, 40, lambda i: {"250g": round(20 + temps[i]), "1kg": 25, "2kg": 3})
+        model, d = _fit(daily, temperature_by_day=dict(zip(daily["date"], temps)))
+        plain = forecast.fit(daily, _baskets(daily), PROFILE, d)
+        assert forecast.mean(model, d, "250g", temperature=None) == pytest.approx(
+            forecast.mean(plain, d, "250g"))
+
+    def test_recommendation_follows_the_weather(self):
+        daily, weather = self._rainy_history()
+        model, d = _fit(daily, weather_by_day=weather)
+        assert (forecast.recommend(model, d, "250g", weather_score=0)
+                < forecast.recommend(model, d, "250g", weather_score=2))

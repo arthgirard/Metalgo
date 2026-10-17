@@ -57,6 +57,33 @@ MIN_FIT_DAYS = 8
 DISPERSION_DAYS = 30
 DISPERSION_K_MIN, DISPERSION_K_MAX = 1.0, 1e6
 
+# Optional adjustments. The model can learn them whenever it is given the
+# data; these switches decide whether the app and the nightly fit pass that
+# data in. Each is turned on only when the walk-forward harness shows a gain.
+# Measured 2026-10-17, last 44 trading days, daily-total MAE at D+0 / D+1 / D+2
+# (`python backtest.py --trials`):
+#
+#   blend               11.29 / 11.46 / 11.62
+#   + calendar events   11.27 / 11.44 / 11.60   kept: event days left out of
+#                                               the fit, the event factor
+#                                               applied to the day itself
+#   + Canadiens games   11.85 / 12.03 / 12.20   dropped: every game day on
+#                                               record is a spring weekend, so
+#                                               the factor mostly re-adds season
+#   + weather score     11.91 / 11.92 / 11.91   dropped
+#   + temperature       11.52 / 11.70 / 11.84   dropped (55 days of samples)
+#
+# Re-run the trials before switching any of these on.
+USE_EVENTS = True
+USE_NHL = False
+USE_WEATHER = False
+USE_TEMPERATURE = False
+
+# Shrinkage: a weather band or a temperature slope seen on few days stays
+# close to "no effect".
+WEATHER_SHRINK_DAYS = 10
+TEMPERATURE_SHRINK_DAYS = 20
+
 
 @dataclass(frozen=True)
 class DemandModel:
@@ -129,10 +156,49 @@ def _dispersion(days, basket_factor):
     return k
 
 
-def fit(daily, baskets, profile, as_of, event_days=frozenset()):
+def _in_sample_ratio(days, level, idx, share, same):
+    """Each fit day's total over the blend's expectation for it."""
+    expected = [sum(_blend(level, idx, share, same, int(w), fmt) for fmt in FORMATS)
+                for w in days["weekday"]]
+    return days["total"].to_numpy(dtype=float) / np.array(expected)
+
+
+def _weather_factors(days, ratio, weather_by_day):
+    by_score = {}
+    for d, r in zip(days["date"], ratio):
+        score = weather_by_day.get(d)
+        if score is not None:
+            by_score.setdefault(int(score), []).append(r)
+    factors = {}
+    for score, ratios in by_score.items():
+        n = len(ratios)
+        factors[score] = float(1 + (np.mean(ratios) - 1) * n / (n + WEATHER_SHRINK_DAYS))
+    return factors
+
+
+def _temperature_slope(days, ratio, temperature_by_day):
+    points = [(temperature_by_day[d], np.log(r)) for d, r in zip(days["date"], ratio)
+              if temperature_by_day.get(d) is not None and r > 0]
+    if len(points) < 3:
+        return None
+    t, y = np.array(points).T
+    t_mean = float(t.mean())
+    spread = float(((t - t_mean) ** 2).sum())
+    if spread == 0:
+        return None
+    slope = float(((t - t_mean) * (y - y.mean())).sum() / spread)
+    n = len(points)
+    return {"t_mean": t_mean, "slope": slope * n / (n + TEMPERATURE_SHRINK_DAYS)}
+
+
+def fit(daily, baskets, profile, as_of, event_days=frozenset(),
+        weather_by_day=None, temperature_by_day=None):
     """
     Fit on trading days strictly before `as_of`, leaving out `event_days`.
     Returns None when there are fewer than MIN_FIT_DAYS such days.
+
+    `weather_by_day` ({date: score}) and `temperature_by_day` ({date: °C})
+    are optional; given, the model learns a multiplier for each.
     """
     days = daily[(daily["date"] < as_of) & ~daily["date"].isin(set(event_days))]
     days = days.sort_values("date").reset_index(drop=True)
@@ -144,19 +210,34 @@ def fit(daily, baskets, profile, as_of, event_days=frozenset()):
     factor = _basket_factor(past_baskets)
     per_customer = (float(past_baskets[FORMATS].sum(axis=1).mean())
                     if not past_baskets.empty else 1.0)
+    extras = {}
+    if weather_by_day or temperature_by_day:
+        ratio = _in_sample_ratio(days, level, idx, share, same)
+        if weather_by_day:
+            extras["weather"] = _weather_factors(days, ratio, weather_by_day)
+        if temperature_by_day:
+            slope = _temperature_slope(days, ratio, temperature_by_day)
+            if slope:
+                extras["temperature"] = slope
     return DemandModel(
         as_of=as_of, level=level, weekday_index=idx, share=share,
         same_weekday_mean=same, basket_factor=factor,
         dispersion=_dispersion(days, factor), profile=profile,
-        bags_per_customer=per_customer,
+        bags_per_customer=per_customer, extras=extras,
     )
 
 
-def mean(model, target, fmt, event_factor=1.0):
+def mean(model, target, fmt, event_factor=1.0, weather_score=None, temperature=None):
     """Expected bags of `fmt` sold on `target`."""
     m = model
-    return _blend(m.level, m.weekday_index, m.share, m.same_weekday_mean,
-                  target.weekday(), fmt) * event_factor
+    mu = _blend(m.level, m.weekday_index, m.share, m.same_weekday_mean,
+                target.weekday(), fmt) * event_factor
+    if weather_score is not None and "weather" in m.extras:
+        mu *= m.extras["weather"].get(int(weather_score), 1.0)
+    if temperature is not None and "temperature" in m.extras:
+        t = m.extras["temperature"]
+        mu *= float(np.exp(t["slope"] * (temperature - t["t_mean"])))
+    return mu
 
 
 def variance(model, fmt, mu):
@@ -173,7 +254,8 @@ def quantile(mu, var, q):
     return int(nbinom.ppf(q, n=mu ** 2 / (var - mu), p=mu / var))
 
 
-def recommend(model, target, fmt, event_factor=1.0, target_sellout=SELLOUT_TARGET):
+def recommend(model, target, fmt, event_factor=1.0, target_sellout=SELLOUT_TARGET,
+              weather_score=None, temperature=None):
     """
     Bags to prepare so the chance of selling out stays at `target_sellout`.
 
@@ -182,7 +264,8 @@ def recommend(model, target, fmt, event_factor=1.0, target_sellout=SELLOUT_TARGE
     P(D >= q + 1) = 1 - P(D <= q) <= target. Without the +1 the walk-forward
     measured the shelf emptying on 14% of format-days against a 10% target.
     """
-    mu = mean(model, target, fmt, event_factor)
+    mu = mean(model, target, fmt, event_factor, weather_score=weather_score,
+              temperature=temperature)
     if mu <= 0:
         return 0
     return quantile(mu, variance(model, fmt, mu), 1 - target_sellout) + 1

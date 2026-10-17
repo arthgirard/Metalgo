@@ -105,3 +105,22 @@ class TestSalesTimes:
             times = history.sales_times(conn, date(2026, 8, 18))
         assert times["1kg"] == [datetime(2026, 8, 18, 11), datetime(2026, 8, 18, 12)]
         assert times["250g"] == [] and times["2kg"] == []
+
+
+class TestDailyWeather:
+    def test_sampler_readings_win_over_sale_labels(self, app_module, history):
+        _fill_day(app_module, "2026-08-18", n=12)       # sale labels say "Ensoleillé" (2)
+        with app_module.get_conn() as conn:
+            for ts, score, temp in (("2026-08-18 10:15:00", 0, 14.0),
+                                    ("2026-08-18 11:15:00", 0, 16.0),
+                                    ("2026-08-18 19:00:00", 2, 30.0)):   # after hours: ignored
+                conn.execute("INSERT INTO weather_log (timestamp, condition, weather_score, temperature)"
+                             " VALUES (?, 'Pluie', ?, ?)", (ts, score, temp))
+            weather = history.daily_weather(conn, date(2026, 8, 19))
+        assert weather[date(2026, 8, 18)] == {"score": 0, "temperature": pytest.approx(15.0)}
+
+    def test_sale_labels_fill_in_before_the_sampler_existed(self, app_module, history):
+        _fill_day(app_module, "2026-08-18", n=12)
+        with app_module.get_conn() as conn:
+            weather = history.daily_weather(conn, date(2026, 8, 19))
+        assert weather[date(2026, 8, 18)] == {"score": 2, "temperature": None}

@@ -20,7 +20,7 @@ The sell-out rate is optimistic: history is itself censored by the sell-outs
 that really happened, so true demand on those days was higher than the
 sales the harness compares against.
 
-    python backtest.py [--db data.db] [--days 44] [--horizons 0 1 2]
+    python backtest.py [--db data.db] [--days 44] [--horizons 0 1 2] [--trials]
 """
 
 import argparse
@@ -30,6 +30,7 @@ from datetime import timedelta
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 
+import event_service
 import forecast
 import history
 import legacy_forest
@@ -38,8 +39,13 @@ from meteo import today_local
 
 FORMATS = list(sched.FORMATS)
 CANDIDATES = ("forest", "weekday_mean", "blend")
+TRIALS = ("blend+events", "blend+events+nhl", "blend+weather", "blend+temperature")
 CENSORED_NOTE = ("Note: sell-out rate is measured on censored history and is optimistic "
                  "(days that really sold out understate demand).")
+TRIAL_NOTE = ("Trials: events use the hardcoded priors (no learned multipliers, which would "
+              "see the future); weather and temperature use each test day's observed values "
+              "as a stand-in for its forecast; blend+temperature is scored only on days with "
+              "sampler readings.")
 
 
 def _open_ro(db_path):
@@ -86,17 +92,37 @@ def _weekday_mean(daily, cutoff, target):
     return {fmt: float(source[fmt].mean()) for fmt in FORMATS}
 
 
-def _blend(daily, baskets, profile, cutoff, target):
-    model = forecast.fit(daily, baskets, profile, cutoff)
+def _blend(daily, baskets, profile, cutoff, target, variant="blend", context=None):
+    """The day-level model, optionally with one of the trial adjustments."""
+    context = context or {}
+    fit_kwargs, mean_kwargs, event_factor = {}, {}, 1.0
+    if variant.startswith("blend+events"):
+        fit_kwargs["event_days"] = context["event_days"]
+        _, base, nhl = event_service.get_special_event(target)
+        event_factor = base * (nhl if variant == "blend+events+nhl" else 1.0)
+    elif variant == "blend+weather":
+        fit_kwargs["weather_by_day"] = {d: w["score"] for d, w in context["weather"].items()
+                                        if w["score"] is not None}
+        mean_kwargs["weather_score"] = (context["weather"].get(target) or {}).get("score")
+    elif variant == "blend+temperature":
+        temperature = (context["weather"].get(target) or {}).get("temperature")
+        if temperature is None:
+            return None
+        fit_kwargs["temperature_by_day"] = {d: w["temperature"] for d, w in context["weather"].items()
+                                            if w["temperature"] is not None}
+        mean_kwargs["temperature"] = temperature
+
+    model = forecast.fit(daily, baskets, profile, cutoff, **fit_kwargs)
     if model is None:
         return None
     out = {}
     for fmt in FORMATS:
-        mu = forecast.mean(model, target, fmt)
+        mu = forecast.mean(model, target, fmt, event_factor, **mean_kwargs)
         var = forecast.variance(model, fmt, mu)
         out[fmt] = {"mean": mu,
                     "q90": forecast.quantile(mu, var, 0.90),
-                    "recommended": forecast.recommend(model, target, fmt)}
+                    "recommended": forecast.recommend(model, target, fmt, event_factor,
+                                                      **mean_kwargs)}
     return out
 
 
@@ -130,6 +156,8 @@ def run(db_path, test_days=44, horizons=(0, 1, 2), candidates=CANDIDATES):
         baskets = history.load_baskets(conn, before)
         profile = history.hourly_profile(conn, before)
         forest = _Forest(conn, set(daily["date"])) if "forest" in candidates else None
+        context = {"weather": history.daily_weather(conn, before),
+                   "event_days": {d for d in daily["date"] if event_service.get_event_key(d)}}
     finally:
         conn.close()
 
@@ -143,8 +171,8 @@ def run(db_path, test_days=44, horizons=(0, 1, 2), candidates=CANDIDATES):
                 target = row.date
                 cutoff = target - timedelta(days=h)
                 actual = {fmt: int(getattr(row, f"_{FORMATS.index(fmt) + 2}")) for fmt in FORMATS}
-                if name == "blend":
-                    pred = _blend(daily, baskets, profile, cutoff, target)
+                if name.startswith("blend"):
+                    pred = _blend(daily, baskets, profile, cutoff, target, name, context)
                 elif name == "weekday_mean":
                     means = _weekday_mean(daily, cutoff, target)
                     pred = _as_point(means) if means else None
@@ -152,7 +180,7 @@ def run(db_path, test_days=44, horizons=(0, 1, 2), candidates=CANDIDATES):
                     pred = _as_point(forest.predict(cutoff, target))
                 if pred is not None:
                     records.append((actual, pred))
-            results[name][h] = _summarise(records, with_spread=(name == "blend"))
+            results[name][h] = _summarise(records, with_spread=name.startswith("blend"))
     return results
 
 
@@ -171,6 +199,8 @@ def _print(results):
             print(f"{name:22s} {r['mae']['250g']:6.2f} {r['mae']['1kg']:6.2f} {r['mae']['2kg']:6.2f} "
                   f"{r['mae']['all']:6.2f} {exceed:>6s} {r['sellout_rate']:8.2f} {r['leftover']:9.2f}")
     print("\n" + CENSORED_NOTE)
+    if any(name in TRIALS for name in results):
+        print(TRIAL_NOTE)
 
 
 def main(argv=None):
@@ -178,8 +208,12 @@ def main(argv=None):
     parser.add_argument("--db", default="data.db")
     parser.add_argument("--days", type=int, default=44)
     parser.add_argument("--horizons", type=int, nargs="+", default=[0, 1, 2])
+    parser.add_argument("--trials", action="store_true",
+                        help="also score the event, NHL, weather and temperature trials")
     args = parser.parse_args(argv)
-    _print(run(args.db, test_days=args.days, horizons=tuple(args.horizons)))
+    candidates = CANDIDATES + (TRIALS if args.trials else ())
+    _print(run(args.db, test_days=args.days, horizons=tuple(args.horizons),
+               candidates=candidates))
 
 
 if __name__ == "__main__":

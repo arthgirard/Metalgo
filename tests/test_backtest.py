@@ -62,3 +62,13 @@ def test_steady_history_is_predicted_closely(app_module, backtest):
     out = backtest.run(app_module.DB_NAME, test_days=5, horizons=(0,), candidates=("blend",))
     # Seeded weekdays sell 21 bags (+ a stray 2kg), weekends 42.
     assert out["blend"][0]["mae"]["all"] < 2
+
+
+def test_trial_candidates_run(app_module, backtest):
+    _seed(app_module)
+    trials = ("blend+events", "blend+events+nhl", "blend+weather", "blend+temperature")
+    out = backtest.run(app_module.DB_NAME, test_days=5, horizons=(0,), candidates=("blend", *trials))
+    for name in ("blend+events", "blend+events+nhl", "blend+weather"):
+        assert out[name][0]["mae"]["all"] == pytest.approx(out["blend"][0]["mae"]["all"], abs=0.5)
+    # No weather_log readings in the seeded data: nothing to test temperature on.
+    assert out["blend+temperature"][0] is None
