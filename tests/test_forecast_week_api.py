@@ -27,10 +27,10 @@ def _day(client, day):
     return next(d for d in client.get('/api/forecast_week').get_json() if d["date"] == day)
 
 
-def test_lists_today_and_skips_closed_days(client, app_module, monkeypatch):
+def test_lists_the_next_seven_days_without_today_or_closed_days(client, app_module, monkeypatch):
     _at(app_module, monkeypatch, datetime(2026, 12, 19, 10, 0))
     dates = [d["date"] for d in client.get('/api/forecast_week').get_json()]
-    assert dates == [f"2026-12-{d}" for d in (19, 20, 22, 23, 24, 26)]
+    assert dates == [f"2026-12-{d}" for d in (20, 22, 23, 24, 26)]
 
 
 def test_each_day_carries_a_recommendation_above_the_expected(client, fitted):
@@ -44,7 +44,7 @@ def test_each_day_carries_a_recommendation_above_the_expected(client, fitted):
 def test_no_model_still_lists_days(client, app_module, monkeypatch):
     _at(app_module, monkeypatch, NOW)
     days = client.get('/api/forecast_week').get_json()
-    assert days and days[0]["date"] == "2026-10-22"
+    assert days and days[0]["date"] == "2026-10-23"
     assert days[0]["attendu"] == {} and days[0]["recommande"] == {}
 
 

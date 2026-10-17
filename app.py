@@ -448,8 +448,9 @@ def _recommendations(model, day, weekly):
 @app.route('/api/forecast_week')
 def forecast_week():
     """
-    Today and the following seven calendar days that are open, each with the
-    expected sales and the bags to prepare per format.
+    The seven calendar days after today that are open, each with the
+    expected sales and the bags to prepare per format. Today is left out:
+    the Aujourd'hui view already forecasts it from the day's real sales.
 
     The planner often prepares a whole weekend two days ahead, so nothing
     here assumes anyone looks at it on the morning itself.
@@ -458,7 +459,7 @@ def forecast_week():
     model = get_demand_model()
     weekly = get_weekly_forecast() if (forecast.USE_WEATHER or forecast.USE_TEMPERATURE) else []
     result = []
-    for day in sched.upcoming_open_days(today):
+    for day in sched.upcoming_open_days(today + timedelta(days=1), 7):
         expected, recommended = _recommendations(model, day, weekly)
         result.append({
             "date": day.strftime("%Y-%m-%d"),

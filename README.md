@@ -9,7 +9,7 @@ Staff log each bag sold with one press of a USB button by the register. Those pr
 ## 🚀 Key Features
 
 * **Real-Time Dashboard:** Live tracking of sales volume, peak hours, and total mass.
-* **7-day forecast:** For today and the next seven calendar days (closed days skipped), the expected sales per format. A whole weekend can be prepared two days ahead.
+* **7-day forecast:** For the next seven calendar days after today (closed days skipped), the expected sales per format. A whole weekend can be prepared two days ahead.
 * **Same-day forecast:** The Aujourd'hui view shows the day's expected total per format and its likely range, adjusted to how many customers have come in so far.
 * **Context Awareness:**
     * **Weather Integration:** Fetches current conditions, an hour-by-hour curve for today, and a 7-day outlook (via Open-Meteo). Weather is also sampled on a timer while the shop is open, independently of whether anything sells.
