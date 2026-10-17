@@ -487,7 +487,7 @@ def _build_prediction(now, real_sales):
     formats = list(sched.FORMATS)
     sold = {fmt: real_sales.get(fmt, 0) for fmt in formats}
 
-    if sched.is_closed_day(now.weekday()):
+    if sched.is_closed_on(now.date()):
         # Every key the open-day branch returns, so the client never has to
         # deal with a differently-shaped payload on Mondays.
         return {"heures_restantes": 0, "meteo": weather_cond,
@@ -625,7 +625,7 @@ def forecast_week_endpoint():
             dt = datetime.strptime(day_data['date'], "%Y-%m-%d")
             event_name, base_event_factor, _ = get_special_event(dt.date(), db_path=DB_NAME)
             is_game, is_playoff = get_game_info(dt.date())
-            closed = sched.is_closed_day(dt.weekday())
+            closed = sched.is_closed_on(dt.date())
 
             day_temp = day_data.get('temperature')
             if day_temp is None:

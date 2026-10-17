@@ -37,6 +37,10 @@ CLOSE_HOUR_LATE = 18
 CLOSED_WEEKDAY = 0                      # Monday: shop closed all day
 LATE_WEEKDAYS = frozenset({3, 4})       # Thursday, Friday
 
+# Calendar dates the shop is shut whatever weekday they fall on, as
+# (month, day): Christmas Day and New Year's Day.
+CLOSED_DATES = frozenset({(12, 25), (1, 1)})
+
 # The widest window the shop can ever be open, used for display grids.
 MAX_CLOSE_HOUR = CLOSE_HOUR_LATE
 
@@ -89,9 +93,21 @@ def selling_hours(py_weekday):
     return range(OPEN_HOUR, close_hour(py_weekday))
 
 
+def is_closed_on(d):
+    """True if the shop is shut all day on this date: a Monday or a CLOSED_DATES day."""
+    return is_closed_day(d.weekday()) or (d.month, d.day) in CLOSED_DATES
+
+
+def selling_hours_on(d):
+    """`selling_hours` for a specific date, empty on closed dates as well."""
+    if is_closed_on(d):
+        return range(0)
+    return selling_hours(d.weekday())
+
+
 def is_open_at(dt):
     """True if the shop is open at the given (shop-local) datetime."""
-    return dt.hour in selling_hours(dt.weekday())
+    return dt.hour in selling_hours_on(dt.date())
 
 
 def hour_buckets(py_weekday, observed_hours=()):

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -123,3 +123,24 @@ class TestModelHyperparameters:
         """
         import train_model
         assert "temperature" not in train_model.FEATURE_COLUMNS
+
+
+class TestClosedDates:
+    """
+    The shop shuts on Christmas Day and New Year's Day whatever weekday they
+    fall on. Training already ignores those days (no sales), but the planning
+    screen, the weather sampler and the open/closed pill must know too.
+    """
+
+    def test_christmas_and_new_year_are_closed(self):
+        assert sched.is_closed_on(date(2026, 12, 25))   # a Friday
+        assert sched.is_closed_on(date(2027, 1, 1))     # a Friday
+        assert sched.selling_hours_on(date(2026, 12, 25)) == range(0)
+
+    def test_mondays_still_closed_and_other_days_open(self):
+        assert sched.is_closed_on(date(2026, 10, 19))
+        assert not sched.is_closed_on(date(2026, 12, 24))
+        assert sched.selling_hours_on(date(2026, 12, 24)) == range(10, 18)  # a Thursday: late close
+
+    def test_not_open_at_noon_on_christmas(self):
+        assert not sched.is_open_at(datetime(2026, 12, 25, 12, 0))
