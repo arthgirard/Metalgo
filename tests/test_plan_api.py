@@ -130,3 +130,17 @@ def test_last_week_shows_conversions_and_sellouts(client, fitted):
     assert [(c["source"], c["target"], c["source_bags"]) for c in week["conversions"]] == [("2kg", "250g", 2)]
     assert week["ruptures"] == ["2kg"]
     assert week["incoherent"] == []
+
+
+def test_last_week_sellout_shows_without_a_closing(client, fitted):
+    last_saturday = "2026-10-17"
+    with fitted.get_conn() as conn:
+        conn.execute("DELETE FROM logs WHERE date(timestamp) = ?", (last_saturday,))
+    for i in range(6):
+        _insert(fitted, f"{last_saturday} 11:0{i}:00", "2kg")
+    for i in range(5):
+        _insert(fitted, f"{last_saturday} 14:0{i}:00", "250g")
+    import stock
+    with fitted.get_conn() as conn:
+        stock.save_plan(conn, last_saturday, {"250g": 40, "1kg": 30, "2kg": 6}, None, NOW)
+    assert _day(client, "2026-10-24")["semaine_derniere"]["ruptures"] == ["2kg"]

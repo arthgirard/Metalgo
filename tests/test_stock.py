@@ -170,6 +170,18 @@ class TestRecords:
             result = stock.confirmed_sellouts(conn, date(2026, 10, 16))
         assert result == {(date(2026, 10, 14), "250g"): 10}
 
+    def test_a_past_day_with_a_plan_counts_without_a_closing(self, app_module, stock):
+        """Clerks often skip the closing; the plan and the sales are enough."""
+        for i in range(10):
+            _insert(app_module, f"2026-10-14 11:{i:02d}:00", "250g")
+        for i in range(4):
+            _insert(app_module, f"2026-10-14 15:{i:02d}:00", "1kg")
+        with app_module.get_conn() as conn:
+            stock.save_plan(conn, "2026-10-14", PLAN, None, NOW)
+            assert stock.confirmed_sellouts(conn, date(2026, 10, 16)) == {(date(2026, 10, 14), "250g"): 10}
+            assert stock.day_status(conn, "2026-10-14", ended=True)["250g"]["status"] == "sold_out"
+            assert stock.day_status(conn, "2026-10-14")["250g"]["status"] is None
+
     def test_forecast_record(self, app_module, stock):
         with app_module.get_conn() as conn:
             stock.record_forecast(conn, [{"target_date": "2026-10-17", "format": "250g",

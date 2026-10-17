@@ -11,12 +11,14 @@ Three records, all entered by staff:
 
   bagging_plan     bags of each format for a date, often saved days ahead
   conversions      2kg (or 1kg) bags opened and repacked into a smaller format
-  closing_record   the end-of-day confirmation, with optional leftovers
+  closing_record   optional end-of-day record, with leftovers
 
 From them and the logged sales, `format_status` derives the stock and
-whether each format sold out. Only a confirmed sell-out (plan + closing +
-sales reaching the stock while the shop kept selling other formats) is ever
-used as censored demand; anything that does not add up is flagged instead.
+whether each format sold out. A sell-out (a plan, and sales reaching the
+stock while the shop kept selling other formats) is used as censored demand
+once the day is over, closing record or not; anything that does not add up
+is flagged instead. The closing is optional: a leftover counted there vetoes
+a sell-out, and a forgotten one only means that veto is missing.
 """
 
 from datetime import datetime
@@ -207,26 +209,32 @@ def _sellout(fmt, stock, sold_times, times, entry, left=None):
     return "sold_out"
 
 
-def day_status(conn, day):
-    """`format_status` for a stored day, or None when it has no plan."""
+def day_status(conn, day, ended=False):
+    """
+    `format_status` for a stored day, or None when it has no plan.
+
+    A day is judged once it has a closing record or once it is over
+    (`ended`): clerks often skip the closing, and the plan plus the sales
+    are enough to see a sell-out. The closing only adds leftovers and
+    repacks, which can veto one.
+    """
     plan = get_plan(conn, day)
     if plan is None:
         return None
     times = history.sales_times(conn, datetime.strptime(day, "%Y-%m-%d").date())
     closing = get_closing(conn, day)
-    return format_status(plan, get_conversions(conn, day), times, closed=closing is not None,
+    return format_status(plan, get_conversions(conn, day), times,
+                         closed=ended or closing is not None,
                          leftovers=(closing or {}).get("leftovers"))
 
 
 def confirmed_sellouts(conn, before):
-    """{(date, format): bags sold} for every confirmed sell-out before `before`."""
+    """{(date, format): bags sold} for every sell-out on a planned day before `before`."""
     days = [row[0] for row in conn.execute(
-        "SELECT c.date FROM closing_record c WHERE c.date < ? "
-        "AND EXISTS (SELECT 1 FROM bagging_plan p WHERE p.date = c.date)",
-        (before.strftime("%Y-%m-%d"),))]
+        "SELECT DISTINCT date FROM bagging_plan WHERE date < ?", (before.strftime("%Y-%m-%d"),))]
     out = {}
     for day in days:
-        for fmt, entry in (day_status(conn, day) or {}).items():
+        for fmt, entry in (day_status(conn, day, ended=True) or {}).items():
             if entry["status"] == "sold_out":
                 out[(datetime.strptime(day, "%Y-%m-%d").date(), fmt)] = entry["sold"]
     return out

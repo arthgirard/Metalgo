@@ -530,7 +530,7 @@ def _changed(stored, current):
 def _last_week(conn, day):
     """The same weekday a week earlier, as the planner used to read it off paper."""
     then = (day - timedelta(days=7)).strftime("%Y-%m-%d")
-    status = stock.day_status(conn, then) or {}
+    status = stock.day_status(conn, then, ended=True) or {}
     return {
         "date": then,
         "conversions": stock.get_conversions(conn, then),
