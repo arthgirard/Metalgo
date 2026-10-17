@@ -27,6 +27,8 @@ Rather than pick a winner, every conversion goes through
 drift apart again.
 """
 
+from datetime import timedelta
+
 OPEN_HOUR = 10
 
 # Regular closing hour, and the later one used on Thursdays and Fridays.
@@ -128,3 +130,13 @@ def hour_buckets(py_weekday, observed_hours=()):
 def hour_buckets_sql(sql_weekday, observed_hours=()):
     """Same as `hour_buckets`, for a weekday in the SQLite `%w` convention."""
     return hour_buckets(py_weekday_from_sql(sql_weekday), observed_hours)
+
+
+# The planning horizon: today plus the following seven calendar days.
+PLANNING_CALENDAR_DAYS = 8
+
+
+def upcoming_open_days(start, calendar_days=PLANNING_CALENDAR_DAYS):
+    """`start` and the days after it, `calendar_days` in all, minus closed ones."""
+    return [start + timedelta(days=i) for i in range(calendar_days)
+            if not is_closed_on(start + timedelta(days=i))]

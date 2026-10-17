@@ -1,41 +1,135 @@
+"""
+Nightly fit of the day-level demand model (forecast.py), with a safety check
+before it replaces the model in service.
+
+Runs at 03:00, once at startup, and from the "Recalibrer" button:
+
+    python train_model.py
+"""
+
 import os
 import sqlite3
 import tempfile
-from datetime import datetime
+from datetime import timedelta
 
 import joblib
+import numpy as np
 
+import forecast
+import history
 import shop_schedule as sched
-from history import MIN_LOGS_THRESHOLD
-from legacy_forest import (FEATURE_COLUMNS, RF_PARAMS, _baseline_prediction,  # noqa: F401
-                           _build_grid, _daily_context, _evaluate, _fit,
-                           _load_sales, _load_weather_log, _mode_or, _prepare_sales)
-from meteo import now_local
+import stock
+from event_service import get_event_key, get_special_event
+from meteo import get_weekly_forecast, now_local
 
 DB_NAME = "data.db"
 MODEL_PATH = "model.pkl"
 FORMATS = list(sched.FORMATS)
 
-# A weekday with fewer observed days than this is flagged to the UI as thin.
-# Live data has 21 Sundays and 14 Saturdays but only 7 of each weekday from
-# Tuesday to Friday, and the `weekday` feature is one the forest leans on.
-THIN_COVERAGE_DAYS = 8
+PAYLOAD_VERSION = 2
+
+# The light gate: one-day-ahead error over this many recent days, against a
+# plain same-weekday mean on the same days. The full walk-forward lives in
+# backtest.py; this only has to catch a fit gone wrong overnight.
+GATE_DAYS = 14
+
+# How much worse than the same-weekday mean a new fit may score there and
+# still replace the old one. Over 14 days the gap between two reasonable
+# forecasts is mostly noise (live data: 10.85 vs 10.37 for a model that wins
+# the 44-day walk-forward), and rejecting on noise would freeze the model
+# with a stale level night after night. The check exists to catch a fit
+# that has gone clearly wrong.
+GATE_TOLERANCE = 1.25
 
 
-def _weekday_coverage(dataset):
+# ---------------------------------------------------------------------------
+# Inputs for one target day
+# ---------------------------------------------------------------------------
+
+def day_inputs(day, db_path, weekly_forecast=None):
     """
-    How many distinct days of history exist per weekday, and which of those
-    are too thin to trust. Surfaced in the UI so nobody reads a Wednesday
-    forecast built on seven Wednesdays as though it were a Sunday forecast
-    built on twenty-one.
+    The keyword arguments forecast.mean/recommend take for `day`, following
+    the measured switches in forecast.py. `weekly_forecast` is the list from
+    meteo.get_weekly_forecast(); it is only read when a weather switch is on.
     """
-    days = dataset[['date_val', 'weekday']].drop_duplicates()
-    counts = {int(w): int(n) for w, n in days.groupby('weekday').size().items()}
-    return {
-        "days_per_weekday": counts,
-        "thin_weekdays": sorted(w for w, n in counts.items() if n < THIN_COVERAGE_DAYS),
-        "threshold": THIN_COVERAGE_DAYS,
+    _, base, nhl = get_special_event(day, db_path=db_path)
+    factor = 1.0
+    if forecast.USE_EVENTS:
+        factor *= base
+    if forecast.USE_NHL:
+        factor *= nhl
+    kwargs = {"event_factor": factor}
+
+    if forecast.USE_WEATHER or forecast.USE_TEMPERATURE:
+        entry = next((d for d in weekly_forecast or [] if d["date"] == day.strftime("%Y-%m-%d")), {})
+        if forecast.USE_WEATHER:
+            kwargs["weather_score"] = entry.get("score")
+        if forecast.USE_TEMPERATURE:
+            kwargs["temperature"] = entry.get("temperature")
+    return kwargs
+
+
+def _fit_inputs(conn, before):
+    """Everything forecast.fit needs, read once."""
+    daily = history.load_daily_sales(conn, before)
+    inputs = {
+        "daily": daily,
+        "baskets": history.load_baskets(conn, before),
+        "profile": history.hourly_profile(conn, before),
+        "fit_kwargs": {"censored": stock.confirmed_sellouts(conn, before)},
     }
+    if forecast.USE_EVENTS:
+        inputs["fit_kwargs"]["event_days"] = {d for d in daily["date"] if get_event_key(d)}
+    if forecast.USE_WEATHER or forecast.USE_TEMPERATURE:
+        weather = history.daily_weather(conn, before)
+        if forecast.USE_WEATHER:
+            inputs["fit_kwargs"]["weather_by_day"] = {
+                d: w["score"] for d, w in weather.items() if w["score"] is not None}
+        if forecast.USE_TEMPERATURE:
+            inputs["fit_kwargs"]["temperature_by_day"] = {
+                d: w["temperature"] for d, w in weather.items() if w["temperature"] is not None}
+    return inputs
+
+
+def _fit(inputs, as_of):
+    return forecast.fit(inputs["daily"], inputs["baskets"], inputs["profile"], as_of,
+                        **inputs["fit_kwargs"])
+
+
+# ---------------------------------------------------------------------------
+# Safety check
+# ---------------------------------------------------------------------------
+
+def _light_gate(inputs):
+    """
+    D+1 error on the day's total over the last GATE_DAYS trading days,
+    model vs same-weekday mean, each fitted only on days before the eve.
+    """
+    daily = inputs["daily"]
+    model_errors, baseline_errors = [], []
+    for row in daily.tail(GATE_DAYS).itertuples(index=False):
+        cutoff = row.date - timedelta(days=1)
+        model = _fit(inputs, cutoff)
+        past = daily[daily["date"] < cutoff]
+        same = past[past["weekday"] == row.weekday]
+        if model is None or same.empty:
+            continue
+        predicted = sum(forecast.mean(model, row.date, fmt) for fmt in FORMATS)
+        model_errors.append(abs(predicted - row.total))
+        baseline_errors.append(abs(same["total"].mean() - row.total))
+    if not model_errors:
+        return {"mae": None, "baseline_mae": None, "n_days": 0}
+    return {"mae": round(float(np.mean(model_errors)), 2),
+            "baseline_mae": round(float(np.mean(baseline_errors)), 2),
+            "n_days": len(model_errors)}
+
+
+def _has_current_payload(path):
+    try:
+        payload = joblib.load(path)
+    except Exception:
+        return False
+    return isinstance(payload, dict) and payload.get("version") == PAYLOAD_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -70,78 +164,81 @@ def save_model_payload(payload, path=MODEL_PATH):
 
 def train_model(db_name=DB_NAME, model_path=MODEL_PATH):
     """
-    Retrain from scratch and persist. Returns the metrics dict, or None when
-    there wasn't enough data to train at all.
+    Fit as of today, check it, persist it, and record the recommendations it
+    makes for the upcoming open days. Returns the metrics dict, or None when
+    there is not enough history to fit at all.
     """
     print(">>> Training model...")
+    now = now_local()
+    today = now.date()
     conn = sqlite3.connect(db_name, timeout=30.0)
     try:
-        sales = _load_sales(conn)
-        weather_log = _load_weather_log(conn)
+        # The tables this writes to may not exist yet on a database the app
+        # never opened; creating them is additive and idempotent.
+        stock.init_tables(conn)
+        inputs = _fit_inputs(conn, today)
     finally:
         conn.close()
 
-    if sales.empty:
-        print("No sales logged yet.")
+    model = _fit(inputs, today)
+    if model is None:
+        print(f"Not enough history to fit ({len(inputs['daily'])} trading days, "
+              f"need {forecast.MIN_FIT_DAYS}).")
         return None
 
-    # EXCLUDE TODAY: prevents poisoning the model with incomplete afternoon
-    # hours, which would look like a collapse in demand after lunch.
-    today_str = now_local().strftime('%Y-%m-%d')
-    sales = sales[sales['date_val'] < today_str]
-    if sales.empty:
-        print("No past valid data for training.")
-        return None
+    gate = _light_gate(inputs)
+    loses = gate["mae"] is not None and gate["mae"] > gate["baseline_mae"]
+    broken = gate["mae"] is not None and gate["mae"] > gate["baseline_mae"] * GATE_TOLERANCE
+    metrics = {"status": "ok", "gate": gate, "n_days": len(inputs["daily"]),
+               "censored_days": len(inputs["fit_kwargs"]["censored"])}
 
-    # Drop days that look like a partial log rather than a quiet day.
-    counts_per_day = sales.groupby('date_val').size()
-    sales = sales[sales['date_val'].isin(counts_per_day[counts_per_day >= MIN_LOGS_THRESHOLD].index)]
-    if sales.empty:
-        print(f"No day reached {MIN_LOGS_THRESHOLD} logged sales.")
-        return None
-
-    sales = _prepare_sales(sales)
-    if not weather_log.empty:
-        weather_log = weather_log[weather_log['date_val'] < today_str]
-
-    dataset = _build_grid(sales, weather_log)
-
-    metrics = _evaluate(dataset)
-    metrics.update(_weekday_coverage(dataset))
-
-    models = _fit(dataset)
-    if not models:
-        print("Nothing to fit.")
-        return None
+    if broken and _has_current_payload(model_path):
+        print(f"Nightly fit rejected: MAE {gate['mae']} vs baseline {gate['baseline_mae']}; "
+              f"keeping previous model.")
+        metrics["status"] = "rejected"
+        return metrics
 
     save_model_payload({
-        "models": models,
-        "feature_columns": list(FEATURE_COLUMNS),
-        "formats": list(FORMATS),
+        "version": PAYLOAD_VERSION,
+        "demand_model": model,
         "metrics": metrics,
-        "trained_at": now_local().strftime("%Y-%m-%d %H:%M:%S"),
-        "n_training_rows": int(len(dataset)),
+        "trained_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "switches": {"events": forecast.USE_EVENTS, "nhl": forecast.USE_NHL,
+                     "weather": forecast.USE_WEATHER, "temperature": forecast.USE_TEMPERATURE},
     }, model_path)
 
-    # The server log is where model quality lives: the counter UI deliberately
-    # shows staff a forecast and its range, not diagnostics.
-    if metrics.get("status") == "ok":
-        verdict = ("beats" if metrics["baseline_mae"] > metrics["mae"] else "LOSES TO")
-        print(f"Training complete. Holdout MAE {metrics['mae']} {verdict} the "
-              f"same-weekday-hour baseline {metrics['baseline_mae']} "
-              f"(ratio {metrics['improvement_vs_baseline']}) over "
-              f"{metrics['n_holdout_days']} of {metrics['n_days']} days.")
-    else:
-        print(f"Training complete. Not enough history for holdout metrics "
-              f"({metrics.get('n_days', 0)} days).")
+    _record_forecasts(db_name, model, now)
 
-    thin = metrics.get("thin_weekdays") or []
-    if thin:
-        counts = metrics.get("days_per_weekday", {})
-        detail = ", ".join(f"{sched.WEEKDAY_NAMES_FR[sched.py_weekday_from_sql(w)]}={counts.get(w, 0)}"
-                           for w in thin)
-        print(f"  Thin weekday coverage (under {metrics['threshold']} days): {detail}")
+    # The server log is where model quality lives: the counter UI shows staff
+    # a recommendation and its margin, not diagnostics.
+    if gate["mae"] is None:
+        print(f"Training complete. Not enough history for the check ({metrics['n_days']} days).")
+    else:
+        verdict = "LOSES TO" if loses else "beats"
+        print(f"Training complete. D+1 MAE {gate['mae']} {verdict} the same-weekday mean "
+              f"{gate['baseline_mae']} over the last {gate['n_days']} days.")
     return metrics
+
+
+def _record_forecasts(db_name, model, now):
+    """What this model recommends for each upcoming open day, as of now."""
+    weekly = None
+    if forecast.USE_WEATHER or forecast.USE_TEMPERATURE:
+        weekly = get_weekly_forecast()
+    rows = []
+    for day in sched.upcoming_open_days(now.date()):
+        kwargs = day_inputs(day, db_name, weekly)
+        for fmt in FORMATS:
+            rows.append({"target_date": day.strftime("%Y-%m-%d"), "format": fmt,
+                         "horizon_days": (day - now.date()).days,
+                         "expected": forecast.mean(model, day, fmt, **kwargs),
+                         "recommended": forecast.recommend(model, day, fmt, **kwargs)})
+    conn = sqlite3.connect(db_name, timeout=30.0)
+    try:
+        stock.record_forecast(conn, rows, now)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

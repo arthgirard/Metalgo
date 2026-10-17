@@ -18,7 +18,9 @@ from event_service import get_event_key, get_game_info, get_special_event
 from meteo import (FALLBACK_TEMPERATURE, NEUTRAL_WEATHER_SCORE, get_current_weather,
                    get_today_hourly_weather, get_weekly_forecast, now_local, today_local,
                    weather_score_from_label)
-from train_model import FEATURE_COLUMNS, train_model
+import forecast
+from legacy_forest import FEATURE_COLUMNS
+from train_model import PAYLOAD_VERSION, train_model
 
 app = Flask(__name__)
 
@@ -165,23 +167,15 @@ def snapshot_completed_days():
 
 def _normalise_payload(payload):
     """
-    Accepts the current payload shape and rejects anything trained on a
-    different feature set.
+    Accepts only the current payload shape: a fitted forecast.DemandModel.
 
-    Older model.pkl files were a bare {format: estimator} dict fitted with an
-    `is_special_event` column that no longer exists. Feeding today's frames
-    to one of those produces silent nonsense rather than an error, so they
-    are refused outright and the next retrain replaces them.
+    Older model.pkl files hold per-hour random forests (or, older still, a
+    bare {format: estimator} dict). Nothing reads those any more, so they are
+    refused outright and the next retrain replaces them.
     """
-    if not isinstance(payload, dict) or not payload:
-        return None
-    if "models" not in payload:
-        print("Ignoring legacy model.pkl (pre-metrics format); a retrain will replace it.")
-        return None
-    if list(payload.get("feature_columns") or []) != list(FEATURE_COLUMNS):
-        print("Ignoring model.pkl trained on a different feature set; a retrain will replace it.")
-        return None
-    if not isinstance(payload.get("models"), dict) or not payload["models"]:
+    if (not isinstance(payload, dict) or payload.get("version") != PAYLOAD_VERSION
+            or not isinstance(payload.get("demand_model"), forecast.DemandModel)):
+        print("Ignoring legacy model.pkl; a retrain will replace it.")
         return None
     return payload
 
@@ -211,9 +205,16 @@ def get_model_payload():
     return payload
 
 
-def get_models():
+def get_demand_model():
     payload = get_model_payload()
-    return payload["models"] if payload else None
+    return payload["demand_model"] if payload else None
+
+
+def get_models():
+    # The forest paths below are rewritten onto get_demand_model; until then a
+    # current payload carries no forests and they take their fallback.
+    payload = get_model_payload()
+    return payload.get("models") if payload else None
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +509,7 @@ def _build_prediction(now, real_sales):
     event_name, base_event_factor, nhl_factor = get_special_event(now.date(), db_path=DB_NAME)
     is_game, is_playoff = get_game_info(now.date())
     payload = get_model_payload()
-    models = payload["models"] if payload else None
+    models = payload.get("models") if payload else None
     hourly_weather = get_today_hourly_weather()
     sql_weekday = sched.sql_weekday_from_py(now.weekday())
 
@@ -612,9 +613,9 @@ def _build_prediction(now, real_sales):
 def forecast_week_endpoint():
     # forecast volumes for the next 7 days based on weather and events
     payload = get_model_payload()
-    if not payload:
+    models = payload.get("models") if payload else None
+    if not models:
         return jsonify({"error": "Modèle manquant"})
-    models = payload["models"]
 
     try:
         today_str = today_local().strftime("%Y-%m-%d")

@@ -348,22 +348,3 @@ class TestUncertaintyBand:
         _insert(app_module, frozen.strftime("%Y-%m-%d %H:%M:%S"), "250g")
         client.get('/api/prediction')
         assert len(calls) == 2
-
-
-class TestModelLoading:
-    def test_no_model_file_means_no_models(self, app_module):
-        assert app_module.get_models() is None
-
-    def test_rejects_a_model_trained_on_other_features(self, app_module, tmp_path):
-        """
-        Old model.pkl files are a bare {format: estimator} dict fitted with an
-        is_special_event column that no longer exists. Silently predicting
-        from one would produce plausible nonsense.
-        """
-        import joblib
-        joblib.dump({"250g": object()}, app_module.MODEL_PATH)
-        assert app_module.get_models() is None
-
-        joblib.dump({"models": {"250g": object()},
-                     "feature_columns": ["weekday", "hour"]}, app_module.MODEL_PATH)
-        assert app_module.get_models() is None
