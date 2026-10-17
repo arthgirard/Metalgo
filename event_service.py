@@ -32,6 +32,11 @@ NHL_DEFAULT_MULTIPLIERS = {
 # ---------------------------------------------------------------------------
 SMOOTHING_FACTOR = 3
 
+# How far either side of an event day its ordinary same-weekday baseline may
+# be drawn from. Three weeks keeps a handful of comparison days while staying
+# inside one season.
+BASELINE_WINDOW_DAYS = 21
+
 # In-memory NHL schedule cache to avoid redundant API calls per process lifetime
 _nhl_cache = {}
 
@@ -180,7 +185,7 @@ def _get_learned_multiplier(event_key, default_multiplier, db_path, is_nhl_key=F
         conn = sqlite3.connect(db_path, timeout=10.0)
         c = conn.cursor()
 
-        # --- Fetch event-day statistics ---
+        # --- Event days ---
         if is_nhl_key:
             is_playoff = 1 if event_key == "nhl_playoff" else 0
             # `event_key IS NULL` matters: the baseline below excludes both
@@ -188,52 +193,47 @@ def _get_learned_multiplier(event_key, default_multiplier, db_path, is_nhl_key=F
             # -game-day here would charge the whole holiday uplift to the
             # Canadiens and inflate the NHL multiplier.
             c.execute("""
-                SELECT AVG(total_250g + total_1kg + total_2kg),
-                       COUNT(*),
-                       GROUP_CONCAT(weekday)
+                SELECT date, weekday, total_250g + total_1kg + total_2kg
                 FROM daily_snapshots
                 WHERE is_nhl_game = 1 AND is_nhl_playoff = ? AND event_key IS NULL
             """, (is_playoff,))
         else:
             c.execute("""
-                SELECT AVG(total_250g + total_1kg + total_2kg),
-                       COUNT(*),
-                       GROUP_CONCAT(weekday)
+                SELECT date, weekday, total_250g + total_1kg + total_2kg
                 FROM daily_snapshots
                 WHERE event_key = ?
             """, (event_key,))
-
-        row = c.fetchone()
-        event_avg    = row[0]
-        n_events     = row[1] if row[1] else 0
-        weekdays_raw = row[2]
-
-        # Not enough data — return the prior unchanged
-        if n_events == 0 or event_avg is None or weekdays_raw is None:
+        event_days = c.fetchall()
+        if not event_days:
             return default_multiplier
 
-        # Determine which weekdays these events occurred on (for a fair baseline)
-        weekdays     = list(set(int(w) for w in weekdays_raw.split(',')))
-        placeholders = ','.join('?' * len(weekdays))
+        # --- Baseline per event day: normal days, same weekday, nearby weeks ---
+        # History spans a quiet winter and a busy summer, so an all-year
+        # same-weekday baseline turned "normal for its season" into a dip or
+        # a spike. Each event day is compared with ordinary days of the same
+        # weekday within BASELINE_WINDOW_DAYS of it instead.
+        ratios = []
+        for day_str, weekday, total in event_days:
+            c.execute("""
+                SELECT AVG(total_250g + total_1kg + total_2kg)
+                FROM daily_snapshots
+                WHERE event_key IS NULL
+                  AND is_nhl_game = 0
+                  AND weekday = ?
+                  AND date != ?
+                  AND ABS(julianday(date) - julianday(?)) <= ?
+            """, (weekday, day_str, day_str, BASELINE_WINDOW_DAYS))
+            baseline = c.fetchone()[0]
+            if baseline:
+                ratios.append(total / baseline)
 
-        # --- Fetch baseline: normal days (no event, no game) on the same weekday(s) ---
-        c.execute(f"""
-            SELECT AVG(total_250g + total_1kg + total_2kg)
-            FROM daily_snapshots
-            WHERE event_key IS NULL
-              AND is_nhl_game = 0
-              AND weekday IN ({placeholders})
-        """, weekdays)
-
-        baseline_row = c.fetchone()
-        baseline_avg = baseline_row[0] if baseline_row and baseline_row[0] else None
-
-        if not baseline_avg or baseline_avg == 0:
-            # No baseline available yet (e.g. only event days recorded so far)
+        n_events = len(ratios)
+        if n_events == 0:
+            # No comparable ordinary day near any event day yet.
             return default_multiplier
 
         # --- Bayesian blend ---
-        learned_multiplier = event_avg / baseline_avg
+        learned_multiplier = sum(ratios) / n_events
         weight   = n_events / (n_events + SMOOTHING_FACTOR)
         blended  = weight * learned_multiplier + (1 - weight) * default_multiplier
 

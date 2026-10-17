@@ -1,20 +1,8 @@
-import math
 
 import pytest
 from datetime import datetime, timedelta
 
-
-def _insert(app_module, timestamp, detail, action_type="VENTE"):
-    with app_module.get_conn() as conn:
-        conn.execute(
-            "INSERT INTO logs (timestamp, action_type, detail, meteo_summary, temperature)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (timestamp, action_type, detail, "Ensoleillé", 20.0))
-
-
-def _count(app_module):
-    with app_module.get_conn() as conn:
-        return conn.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+from helpers import _count, _insert, _train_as_of
 
 
 class TestLogValidation:
@@ -226,6 +214,10 @@ class TestStatusAndStats:
 
 
 class TestPrediction:
+    @pytest.fixture(autouse=True)
+    def model(self, app_module, monkeypatch):
+        _train_as_of(app_module, monkeypatch, datetime(2026, 8, 18, 3, 0, 0))
+
     def test_closed_day_returns_the_same_shape_as_an_open_day(self, app_module, client, monkeypatch):
         """
         The Monday early-return used to omit previsions_min/max and
@@ -264,55 +256,13 @@ class TestPrediction:
         for fmt in ("250g", "1kg", "2kg"):
             assert body['previsions_min'][fmt] <= body['previsions'][fmt] <= body['previsions_max'][fmt]
 
-
-class TestUncertaintyBand:
-    """
-    The band under each number is measured holdout error, not the spread
-    across the forest's trees — the latter says only how much the trees agree
-    with each other, and read as about +/-1 bag against a real daily error
-    near 8.
-    """
-
-    @staticmethod
-    def _payload(daily_total_mae):
-        return {"metrics": {"per_format": {"250g": {"daily_total_mae": daily_total_mae}}}}
-
-    def test_full_band_when_the_whole_day_is_ahead(self, app_module):
-        assert app_module._uncertainty(self._payload(8.0), "250g", 1.0) == pytest.approx(8.0)
-
-    def test_band_shrinks_as_the_day_is_locked_in(self, app_module):
-        payload = self._payload(8.0)
-        whole = app_module._uncertainty(payload, "250g", 1.0)
-        half = app_module._uncertainty(payload, "250g", 0.5)
-        nearly_done = app_module._uncertainty(payload, "250g", 0.1)
-        assert whole > half > nearly_done
-        assert half == pytest.approx(8.0 * math.sqrt(0.5))
-
-    def test_no_band_left_at_closing_time(self, app_module):
-        assert app_module._uncertainty(self._payload(8.0), "250g", 0.0) == 0.0
-
-    def test_none_when_the_model_was_never_scored(self, app_module):
-        assert app_module._uncertainty({"metrics": {}}, "250g", 1.0) is None
-        assert app_module._uncertainty(None, "250g", 1.0) is None
-        # A format the holdout could not score gets no band rather than a
-        # fabricated one.
-        assert app_module._uncertainty(self._payload(8.0), "1kg", 1.0) is None
-
-    def test_fraction_is_clamped(self, app_module):
-        payload = self._payload(8.0)
-        assert app_module._uncertainty(payload, "250g", 3.0) == pytest.approx(8.0)
-        assert app_module._uncertainty(payload, "250g", -1.0) == 0.0
-
-    def test_weekly_forecast_carries_no_band(self, app_module, client, monkeypatch):
-        """
-        Deliberately unqualified. A full day ahead carries the whole measured
-        error, wide enough to crowd out the number it qualifies; the daily
-        view keeps a band because it narrows as the day gets locked in.
-        """
-        monkeypatch.setattr(app_module, "get_weekly_forecast", lambda: [])
-        for day in client.get('/api/forecast_week').get_json() or []:
-            assert "totals_min" not in day
-            assert "totals_max" not in day
+    def test_band_narrows_through_the_day(self, app_module, client, monkeypatch):
+        def width(now):
+            monkeypatch.setattr(app_module, "now_local", lambda: now)
+            app_module._prediction_cache.update({"key": None, "value": None})
+            body = client.get('/api/prediction').get_json()
+            return body['previsions_max']['250g'] - body['previsions_min']['250g']
+        assert width(datetime(2026, 8, 18, 11, 0)) > width(datetime(2026, 8, 18, 15, 0))
 
     def test_band_never_dips_below_what_is_already_sold(self, app_module, client, monkeypatch):
         """
@@ -323,12 +273,32 @@ class TestUncertaintyBand:
         monkeypatch.setattr(app_module, "now_local", lambda: afternoon)
         today = afternoon.strftime("%Y-%m-%d")
         for hour in range(10, 16):
-            for _ in range(5):
-                _insert(app_module, f"{today} {hour}:00:00", "250g")
+            for i in range(5):
+                _insert(app_module, f"{today} {hour}:{i * 10:02d}:00", "250g")
 
         body = client.get('/api/prediction').get_json()
         assert body['previsions_min']['250g'] >= 30
 
+    def test_payload_has_the_prediction_keys_only(self, app_module, client, monkeypatch):
+        monkeypatch.setattr(app_module, "now_local", lambda: datetime(2026, 8, 18, 14, 0, 0))
+        assert set(client.get('/api/prediction').get_json()) == {
+            "heures_restantes", "meteo", "previsions", "previsions_min", "previsions_max",
+            "evenement", "debug_info"}
+
+
+class TestPredictionWithoutModel:
+    def test_mirrors_what_is_sold(self, app_module, client, monkeypatch):
+        tuesday = datetime(2026, 8, 18, 14, 0, 0)
+        monkeypatch.setattr(app_module, "now_local", lambda: tuesday)
+        for hour in range(10, 14):
+            _insert(app_module, f"2026-08-18 {hour}:00:00", "1kg")
+        body = client.get('/api/prediction').get_json()
+        assert body['previsions'] == {"250g": 0, "1kg": 4, "2kg": 0}
+        assert body['previsions_min'] == body['previsions_max'] == body['previsions']
+        assert body['debug_info'] == "Modèle manquant"
+
+
+class TestPredictionCache:
     def test_is_cached_within_the_same_minute(self, app_module, client, monkeypatch):
         frozen = datetime(2026, 8, 18, 14, 30, 0)
         monkeypatch.setattr(app_module, "now_local", lambda: frozen)
@@ -359,22 +329,3 @@ class TestUncertaintyBand:
         _insert(app_module, frozen.strftime("%Y-%m-%d %H:%M:%S"), "250g")
         client.get('/api/prediction')
         assert len(calls) == 2
-
-
-class TestModelLoading:
-    def test_no_model_file_means_no_models(self, app_module):
-        assert app_module.get_models() is None
-
-    def test_rejects_a_model_trained_on_other_features(self, app_module, tmp_path):
-        """
-        Old model.pkl files are a bare {format: estimator} dict fitted with an
-        is_special_event column that no longer exists. Silently predicting
-        from one would produce plausible nonsense.
-        """
-        import joblib
-        joblib.dump({"250g": object()}, app_module.MODEL_PATH)
-        assert app_module.get_models() is None
-
-        joblib.dump({"models": {"250g": object()},
-                     "feature_columns": ["weekday", "hour"]}, app_module.MODEL_PATH)
-        assert app_module.get_models() is None

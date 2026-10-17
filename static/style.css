@@ -132,12 +132,12 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 .tab-pill { flex: 1; background: transparent; border: none; padding: 10px; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); border-radius: 8px; cursor: pointer; }
 .tab-pill.active { background: var(--bg-card); color: var(--text-main); box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 
+.align-right { text-align: right; }
+
 .context-banner { display: flex; justify-content: space-between; border-bottom: 1px solid var(--border-soft); padding-bottom: 16px; margin-bottom: 16px; }
 .context-data { display: flex; flex-direction: column; }
-.align-right { text-align: right; }
 .context-lbl { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-bottom: 4px; }
 .context-val { font-size: 1.1rem; font-weight: 700; color: var(--text-main); }
-
 .trend-badge { text-align: center; padding: 8px; border-radius: 8px; font-size: 0.85rem; font-weight: 700; margin-bottom: 16px; }
 .trend-badge.up { background: #FFF7ED; color: #C2410C; }
 .trend-badge.down { background: #EFF6FF; color: #1D4ED8; }
@@ -193,3 +193,4 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 .day-totals { display: flex; gap: 16px; }
 .day-total-col { display: flex; flex-direction: column; align-items: center; }
 .day-expand { padding: 0 16px 16px 16px; }
+

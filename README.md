@@ -2,14 +2,15 @@
 
 **Metalgo** is a bespoke inventory management and sales prediction system developed for **Fromagerie Le Métayer (https://fromagerielemetayer.com)**.
 
-It is designed to solve a specific challenge in fresh cheese curd production: predicting the exact quantity of cheese to bag in different formats (250g, 1kg, 2kg) throughout the day to minimize waste and maximize freshness.
+It is designed to solve a specific challenge in fresh cheese curd production: curds are bagged once, in the morning, in three formats (250g, 1kg, 2kg), and nothing is bagged later in the day. Metalgo predicts the day's sales and recommends how many bags of each format to prepare.
 
-The application combines real-time sales logging with machine learning to provide staff with live production targets based on current trends, weather conditions, and special events.
+Staff log each bag sold with one press of a USB button by the register. Those presses are all the data the forecast needs.
 
 ## 🚀 Key Features
 
 * **Real-Time Dashboard:** Live tracking of sales volume, peak hours, and total mass.
-* **AI-Driven Forecasting:** A **Random Forest Regressor** per bag format predicts the day's demand, shown with an error band derived from the model's measured accuracy on held-out days — which narrows through the day as the remaining hours shrink.
+* **7-day bagging recommendation:** For today and the next seven calendar days (closed days skipped), the number of bags to prepare per format, chosen so a format runs out on about one day in ten. A whole weekend can be prepared two days ahead.
+* **Same-day forecast:** The Aujourd'hui view shows the day's expected total per format and its likely range, adjusted to how many customers have come in so far.
 * **Context Awareness:**
     * **Weather Integration:** Fetches current conditions, an hour-by-hour curve for today, and a 7-day outlook (via Open-Meteo). Weather is also sampled on a timer while the shop is open, independently of whether anything sells.
     * **Event Detection:** Detects Québec holidays, fixed occasions (St-Jean, Halloween), moving ones (Easter, Super Bowl) and Canadiens game days, and learns each one's real effect from history.
@@ -20,7 +21,7 @@ The application combines real-time sales logging with machine learning to provid
 
 * **Backend:** Python 3.14, Flask
 * **Database:** SQLite (lightweight, serverless; runs in WAL mode)
-* **Machine Learning:** scikit-learn (RandomForestRegressor), Pandas, Joblib
+* **Forecasting:** Pandas, NumPy, SciPy (negative binomial), Joblib; scikit-learn only for the retired forest in the evaluation harness
 * **Frontend:** HTML5, CSS3, Vanilla JavaScript, Chart.js
 * **APIs:** Open-Meteo (weather), NHL public API (Canadiens schedule)
 
@@ -49,75 +50,83 @@ server works too:
 gunicorn app:app
 ```
 
-## 🧠 Machine Learning Model
+## 🧠 Demand model
 
-The system learns from its own history. As sales are logged, the dataset grows.
+The forecast is a day-level demand model (`forecast.py`), not a per-hour
+model: what matters is the number of bags to prepare each morning.
 
-* **Training:** a full retrain runs automatically every night at 03:00, once at
-  startup, and on demand from the **Recalibrer** button. To run it by hand:
+* **Expected sales** for a day and format blend two estimates equally: the
+  recent level (last 10 trading days) × that weekday's index × the format's
+  share, and the mean of the last three same weekdays. Calendar events
+  (`event_service.py`) multiply the result; each event's effect is learned
+  against ordinary same-weekday days within three weeks of it and blended
+  with a hardcoded prior.
+* **Spread.** Sales are negative binomial. Customers buy several bags at
+  once (presses at most 2 s apart count as one customer), which sets a floor
+  on the noise; day-to-day variation on top of that is measured from the
+  model's own one-step-ahead errors over the last 30 days.
+* **Recommendation** = 90th percentile + 1, so the chance that demand
+  *reaches* the stock is at most 10% (`SELLOUT_TARGET`). Leftovers are
+  sold the next morning or reground, so the target leans towards having
+  enough.
+* **Sell-outs are not corrected for.** A day a format ran out understates
+  its demand. On the history to 2026-10-17, only 8 of 354 format-days show a
+  format going silent while the others kept selling, all after 15h, so the
+  effect is a few bags late in the day and the model does not try to
+  correct it.
+* **Switched off on measurement.** NHL games, weather and temperature are
+  available as switches in `forecast.py`, but each made the walk-forward
+  error worse on the current history and is off.
+* **Same-day correction.** During the day, the hours left are scaled by the
+  number of customers so far against the number expected by now, trusted
+  more as the day goes on (`CUSTOMER_SMOOTHING`).
 
-      python train_model.py
+### Training
 
-* **Data requirements:** a day needs at least **10 logged sales**
-  (`MIN_LOGS_THRESHOLD`) to be considered a real trading day rather than a
-  partial log, and at least **8 distinct days** of history before holdout
-  metrics are reported at all.
+A fit runs every night at 03:00, once at startup, and from the
+**Recalibrer** button. By hand (it reads `METALGO_DB` / `METALGO_MODEL`):
 
-* **Features used for training:**
-    * Day of week (SQLite `strftime('%w')` convention, Sunday = 0)
-    * Hour of the day
-    * Weather condition score (0 = bad, 1 = neutral, 2 = good)
-    * Canadiens game day / playoff game day
+    python train_model.py
 
-  One model is trained **per bag format**, so the format is not a feature.
-  Trees are capped at `max_depth=4` (`RF_PARAMS`) — see below.
+A day needs at least **10 logged sales** (`MIN_LOGS_THRESHOLD`) to count as
+a trading day; Mondays, Christmas Day and New Year's Day are closed and
+never used. Sales a little before opening or after closing count. The fit
+needs at least 8 trading days.
 
-* **Not a feature — temperature.** It is recorded as a *daily mean*, which
-  over 61 days of history produced 61 distinct values with a smallest gap of
-  0.046 °C: a unique fingerprint per day rather than a weather signal. An
-  unconstrained forest used it to memorise individual days, taking 37% of the
-  feature importance while its training error (1.04) sat at well under half
-  its holdout error (2.74). It is still collected, and can be reinstated once
-  the hourly weather sampler has gathered enough per-hour readings — those
-  vary within a day and so cannot fingerprint one.
+Each night the new fit is checked over the last 14 days at D+1 against the
+same-weekday mean. It is rejected, and the previous model kept, only if its
+error is more than 1.25× the baseline's (`GATE_TOLERANCE`): on two weeks of
+data a good model can lose narrowly by chance. Each fit also writes its
+recommendations for the coming open days into `forecast_log`, so the
+forecasts can later be compared with what happened.
 
-* **Not a feature — calendar events.** As a single binary flag, `is_special_event`
-  made St-Jean (≈2x) and Halloween (≈1.3x) identical to the model, and with only a
-  handful of event days on record it could never learn to separate them. Events are
-  applied at prediction time instead, through a Bayesian blend of each event's
-  observed effect against a hardcoded prior (`event_service.py`). Canadiens games
-  stay model features, because there are enough recorded game days to learn from.
+### Evaluation
 
-* **Honest accuracy reporting.** Every retrain evaluates itself on a
-  chronological holdout of the most recent ~20% of days and compares its MAE
-  against a naive "average for this weekday and hour" baseline. The result is
-  printed to the server log on every retrain. **A ratio at or below 1.0 means
-  the forest is not beating that simple average** — worth knowing before
-  trusting it.
+`backtest.py` is the judge for any forecasting change. For each of the last
+44 trading days it refits on the days before the forecast would really have
+been made (D+0, D+1, D+2) and reports per format the error, the share of
+days above the 90th percentile, the sell-out rate and the leftover:
 
-  That baseline is a genuine rival, not a straw man: it *is* the mean sales
-  per weekday and hour, and a tree given only `weekday` and `hour` converges
-  to exactly the same function. The forest can only win on the strength of
-  the remaining features, so a ratio near 1.0 means weekday × hour is
-  currently carrying nearly all the exploitable signal. Capping tree depth
-  took the ratio from 0.91 to 1.00; getting meaningfully above that needs
-  more history spanning more weather, not more model.
+    python backtest.py --db data.db --days 44 --horizons 0 1 2
+    python backtest.py --trials            # also score events, NHL, weather, temperature
+    python backtest.py --intraday 12 14    # same-day forecast at 12h and 14h
 
-* **The range shown to staff comes from these metrics.** `daily_total_mae` —
-  the mean absolute error on a whole day's total for that format — is the
-  half-width of the band under each number, scaled by the square root of the
-  fraction of the day still ahead. So it is widest at opening and reaches
-  zero at closing, and it reports how wrong the model *actually tends to be*
-  rather than how much its trees happen to agree.
+On the history as of 2026-10-17, the day-total error at D+0 / D+1 / D+2 is
+11.27 / 11.44 / 11.60 bags, against 12.27 / 12.27 / 12.20 for the retired
+random forest and 12.21 for the same-weekday mean. Sell-outs at the
+recommendation run at 10–11%. That rate is measured on history that is
+itself cut short by the few real sell-outs, so it is slightly optimistic.
 
 ## 🧪 Tests
 
     pytest
 
-Covers the opening-hours and weekday-convention helpers, event detection
-(including Easter and Super Bowl math and the years where two events collide),
-the learned-multiplier blend, input validation, undo scoping, snapshot pruning
-and the prediction payload.
+Covers the opening-hours, closed-date and weekday-convention helpers, event
+detection (including Easter and Super Bowl math and the years where two events
+collide), the learned event multipliers, the demand model and its spread, the
+same-day correction, the nightly fit and its gate, the evaluation harness,
+the 7-day forecast endpoint, input validation, undo scoping, snapshot
+pruning and the prediction payload.
 
 ## 🌍 Localization
 
@@ -133,9 +142,14 @@ and the prediction payload.
 re-bagging feature. They are preserved, excluded from every sales figure, and
 displayed as-is rather than as sales.
 
-Two weekday conventions coexist deliberately: `daily_snapshots.weekday` uses
-Python's (Monday = 0) while the model's `weekday` feature uses SQLite's
-(Sunday = 0). All conversions go through `shop_schedule.py`.
+Two weekday conventions coexist: `daily_snapshots.weekday` and the demand
+model use Python's (Monday = 0), while SQL queries read SQLite's
+`strftime('%w')` (Sunday = 0). All conversions go through `shop_schedule.py`.
+
+`forecast_log` (`forecast_log.py`) keeps every nightly recommendation, so
+forecasts can later be compared with what sold. Databases that ran an
+earlier build may also hold empty `bagging_plan`, `conversions` and
+`closing_record` tables; nothing reads them.
 
 ## 📄 License
 

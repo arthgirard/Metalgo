@@ -121,20 +121,20 @@
                 </div>
             </header>
 
-            <div id="event-banner" class="banner-alert" style="display: none;">
-                <div class="banner-icon"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
-                <div class="banner-text">
-                    <strong>Événement détecté</strong>
-                    <span id="event-name">--</span>
-                </div>
-            </div>
-
             <div class="tabs-nav">
                 <button class="tab-pill active" onclick="switchPredict('day', this)">Aujourd'hui</button>
                 <button class="tab-pill" onclick="switchPredict('week', this)">7 Jours</button>
             </div>
 
             <div id="predict-day-content">
+                <div id="event-banner" class="banner-alert" style="display: none;">
+                    <div class="banner-icon"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></div>
+                    <div class="banner-text">
+                        <strong>Événement détecté</strong>
+                        <span id="event-name">--</span>
+                    </div>
+                </div>
+
                 <section class="block-card focus-card">
                     <div class="context-banner">
                         <div class="context-data">
@@ -157,11 +157,9 @@
                         <span id="trend-badge-text">...</span>
                     </div>
 
-                    <!-- The range under each number is the model's measured
-                         error on held-out days, narrowing as the day gets
-                         locked in. Not the spread across the forest's trees,
-                         which only says how much the trees agree with each
-                         other and read as ±1 bag against a real error near 8. -->
+                    <!-- The range under each number is the 10th to 90th
+                         percentile of the day's total, narrowing as the day
+                         gets locked in. -->
                     <div class="prediction-grid">
                         <div class="pred-item">
                             <span class="pred-val color-250g" id="pred-250g">0</span>

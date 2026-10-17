@@ -1,362 +1,135 @@
+"""
+Nightly fit of the day-level demand model (forecast.py), with a safety check
+before it replaces the model in service.
+
+Runs at 03:00, once at startup, and from the "Recalibrer" button:
+
+    python train_model.py
+"""
+
 import os
 import sqlite3
 import tempfile
-from datetime import datetime
+from datetime import timedelta
 
 import joblib
 import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
 
+import forecast
+import forecast_log
+import history
 import shop_schedule as sched
-from event_service import get_game_info
-from meteo import FALLBACK_TEMPERATURE, NEUTRAL_WEATHER_SCORE, now_local, weather_score_from_label
+from event_service import get_event_key, get_special_event
+from meteo import get_weekly_forecast, now_local
 
 DB_NAME = "data.db"
 MODEL_PATH = "model.pkl"
 FORMATS = list(sched.FORMATS)
 
-# A day with fewer than this many sales is treated as a partial/abandoned
-# log rather than a genuinely quiet day, and excluded from training.
-MIN_LOGS_THRESHOLD = 10
+PAYLOAD_VERSION = 2
 
-# Holdout evaluation only runs once there is enough history for the split to
-# mean anything; below this the metrics would be noise.
-MIN_DAYS_FOR_METRICS = 8
-HOLDOUT_FRACTION = 0.2
+# The light gate: one-day-ahead error over this many recent days, against a
+# plain same-weekday mean on the same days. The full walk-forward lives in
+# backtest.py; this only has to catch a fit gone wrong overnight.
+GATE_DAYS = 14
 
-# A weekday with fewer observed days than this is flagged to the UI as thin.
-# Live data has 21 Sundays and 14 Saturdays but only 7 of each weekday from
-# Tuesday to Friday, and the `weekday` feature is one the forest leans on.
-THIN_COVERAGE_DAYS = 8
-
-# Single source of truth for the model's feature set/order. Imported by
-# app.py so every predict() call builds its DataFrame with exactly these
-# columns in exactly this order — sklearn doesn't reliably realign columns
-# by name for you, so training and inference must agree explicitly.
-#
-# `weekday` here is the SQLite `strftime('%w')` convention (Sunday=0), not
-# Python's. See shop_schedule for the converters.
-#
-# `is_special_event` was removed deliberately: as a single binary it made
-# Saint-Jean (roughly 2x) and Halloween (roughly 1.3x) identical to the
-# model, and with only a couple of event days ever recorded it could never
-# learn to tell them apart. Calendar events are applied at prediction time
-# by event_service's Bayesian blend instead, which needs far less data.
-#
-# `temperature` was removed for a different reason: it is stored as the
-# day's MEAN, which across 61 days of history produced 61 distinct values
-# with a minimum gap of 0.046 °C. That makes it a unique fingerprint for
-# each day rather than a weather signal, and the forest duly used it to
-# memorise individual days — it took 37% of the feature importance while
-# training error (1.04) ran at less than half the holdout error (2.74).
-# Dropping it, the holdout MAE improved from 1.839 to 1.672.
-#
-# The dataset still carries a `temperature` column and the weather sampler
-# still records it, so once enough genuine per-HOUR readings accumulate it
-# can be reinstated here and re-measured against the baseline. Hour-level
-# temperature varies within a day and so cannot fingerprint one.
-FEATURE_COLUMNS = ['weekday', 'hour', 'weather_score', 'is_game_day',
-                   'is_playoff_game']
-
-# Forest hyperparameters, shared by the fitted model and the holdout
-# evaluation so the reported metrics describe the model actually shipped.
-#
-# max_depth is the load-bearing one. Left unconstrained (the sklearn
-# default, with min_samples_leaf=1) the forest memorised individual days
-# and scored WORSE than a plain same-weekday-and-hour average — a ratio of
-# 0.91. Capping the depth costs nothing in fit time and brought it back to
-# parity. Measured alternatives: max_depth=6 -> 0.98, min_samples_leaf=20
-# -> 0.99, max_depth=4 -> 1.00.
-RF_PARAMS = {"n_estimators": 100, "random_state": 42, "max_depth": 4}
+# How much worse than the same-weekday mean a new fit may score there and
+# still replace the old one. Over 14 days the gap between two reasonable
+# forecasts is mostly noise (live data: 10.85 vs 10.37 for a model that wins
+# the 44-day walk-forward), and rejecting on noise would freeze the model
+# with a stale level night after night. The check exists to catch a fit
+# that has gone clearly wrong.
+GATE_TOLERANCE = 1.25
 
 
 # ---------------------------------------------------------------------------
-# Loading
+# Inputs for one target day
 # ---------------------------------------------------------------------------
 
-def _load_sales(conn):
-    """One row per logged sale, with its raw context."""
-    return pd.read_sql_query("""
-        SELECT date(timestamp)          AS date_val,
-               strftime('%w', timestamp) AS weekday,
-               strftime('%H', timestamp) AS hour,
-               meteo_summary,
-               temperature,
-               detail                   AS bag_format
-        FROM logs
-        WHERE action_type = 'VENTE'
-    """, conn)
-
-
-def _load_weather_log(conn):
+def day_inputs(day, db_path, weekly_forecast=None):
     """
-    Hourly weather samples, or an empty frame if none have been recorded.
-
-    These are sampled on a timer regardless of whether anything sold, which
-    is the point: `logs.meteo_summary` is only ever written when a sale
-    happens, so a rainy dead morning contributed zero rain observations and
-    the weather feature was effectively sampled proportional to sales.
+    The keyword arguments forecast.mean/recommend take for `day`, following
+    the measured switches in forecast.py. `weekly_forecast` is the list from
+    meteo.get_weekly_forecast(); it is only read when a weather switch is on.
     """
-    empty = pd.DataFrame(columns=['date_val', 'hour', 'weather_score', 'temperature'])
-    try:
-        df = pd.read_sql_query("""
-            SELECT date(timestamp)           AS date_val,
-                   strftime('%H', timestamp) AS hour,
-                   weather_score,
-                   temperature
-            FROM weather_log
-        """, conn)
-    except Exception:
-        return empty          # table doesn't exist yet on an older DB
-    if df.empty:
-        return empty
-    df['hour'] = df['hour'].astype(int)
-    return df
+    _, base, nhl = get_special_event(day, db_path=db_path)
+    factor = 1.0
+    if forecast.USE_EVENTS:
+        factor *= base
+    if forecast.USE_NHL:
+        factor *= nhl
+    kwargs = {"event_factor": factor}
+
+    if forecast.USE_WEATHER or forecast.USE_TEMPERATURE:
+        entry = next((d for d in weekly_forecast or [] if d["date"] == day.strftime("%Y-%m-%d")), {})
+        if forecast.USE_WEATHER:
+            kwargs["weather_score"] = entry.get("score")
+        if forecast.USE_TEMPERATURE:
+            kwargs["temperature"] = entry.get("temperature")
+    return kwargs
 
 
-# ---------------------------------------------------------------------------
-# Feature assembly
-# ---------------------------------------------------------------------------
-
-def _prepare_sales(df):
-    """Type-cast, score the weather, and impute missing temperatures."""
-    df = df.copy()
-    df['weekday'] = df['weekday'].astype(int)
-    df['hour'] = df['hour'].astype(int)
-
-    # None (not a neutral score) for "Indisponible" and friends, so the
-    # imputation below can tell "we don't know" apart from "it was average".
-    df['weather_score'] = df['meteo_summary'].map(weather_score_from_label)
-
-    # `temperature` is a newer column — rows logged before it existed have
-    # NULL here. Rather than dropping that history (or crashing on NaN),
-    # impute with the median of whatever real readings exist so far, so old
-    # days stay usable and just look "temperature unknown/average" to the
-    # model instead of being discarded.
-    median_temp = df['temperature'].median()
-    df['temperature'] = df['temperature'].fillna(
-        median_temp if pd.notna(median_temp) else FALLBACK_TEMPERATURE)
-    return df
+def _fit_inputs(conn, before):
+    """Everything forecast.fit needs, read once."""
+    daily = history.load_daily_sales(conn, before)
+    inputs = {
+        "daily": daily,
+        "baskets": history.load_baskets(conn, before),
+        "profile": history.hourly_profile(conn, before),
+        "fit_kwargs": {},
+    }
+    if forecast.USE_EVENTS:
+        inputs["fit_kwargs"]["event_days"] = {d for d in daily["date"] if get_event_key(d)}
+    if forecast.USE_WEATHER or forecast.USE_TEMPERATURE:
+        weather = history.daily_weather(conn, before)
+        if forecast.USE_WEATHER:
+            inputs["fit_kwargs"]["weather_by_day"] = {
+                d: w["score"] for d, w in weather.items() if w["score"] is not None}
+        if forecast.USE_TEMPERATURE:
+            inputs["fit_kwargs"]["temperature_by_day"] = {
+                d: w["temperature"] for d, w in weather.items() if w["temperature"] is not None}
+    return inputs
 
 
-def _mode_or(series, default):
-    """Most common non-null value, or `default` when there isn't one."""
-    values = series.dropna()
-    if values.empty:
-        return default
-    return values.mode().iloc[0]
-
-
-def _daily_context(sales, weather_log):
-    """
-    One row per day: weekday, and the day's representative weather.
-
-    Weather is aggregated across the whole day (mean temperature, modal
-    score) rather than taken from whichever sale happened to be logged
-    first. A single early sale is not representative of the day, and
-    training on it was why the weekly forecast — which uses a real day-level
-    forecast value — disagreed so much with same-day predictions.
-    """
-    context = sales.groupby('date_val').agg(
-        weekday=('weekday', 'first'),
-        temperature=('temperature', 'mean'),
-        weather_score=('weather_score', lambda s: _mode_or(s, np.nan)),
-    ).reset_index()
-
-    if not weather_log.empty:
-        # Unbiased samples win over the sales-sampled ones wherever they exist.
-        sampled = weather_log.groupby('date_val').agg(
-            sampled_temperature=('temperature', 'mean'),
-            sampled_score=('weather_score', lambda s: _mode_or(s, np.nan)),
-        ).reset_index()
-        context = context.merge(sampled, on='date_val', how='left')
-        context['temperature'] = context['sampled_temperature'].fillna(context['temperature'])
-        context['weather_score'] = context['sampled_score'].fillna(context['weather_score'])
-        context = context.drop(columns=['sampled_temperature', 'sampled_score'])
-
-    context['weather_score'] = context['weather_score'].fillna(NEUTRAL_WEATHER_SCORE)
-    context['temperature'] = context['temperature'].fillna(FALLBACK_TEMPERATURE)
-    return context
-
-
-def _build_grid(sales, weather_log):
-    """
-    The (day, hour, format) grid the model trains on, with zero-sale hours
-    present so the forest learns when *not* to expect sales.
-
-    Hours come from `shop_schedule.hour_buckets`, which is the scheduled
-    selling window UNION the hours that actually have sales. The old grid
-    used the scheduled window alone and merged sales into it with a left
-    join, so every sale outside it vanished without a warning — 26 of them
-    in the live database, at 9h, at 17h on regular days, and at 18h.
-    """
-    context = _daily_context(sales, weather_log)
-    observed_hours = sales.groupby('date_val')['hour'].apply(set).to_dict()
-
-    game_info_cache = {}
-
-    def game_info(date_val):
-        if date_val not in game_info_cache:
-            day = datetime.strptime(date_val, "%Y-%m-%d").date()
-            game_info_cache[date_val] = get_game_info(day)
-        return game_info_cache[date_val]
-
-    # Hour-level weather, where the sampler has recorded it. Days that
-    # predate the sampler fall back to their day-level aggregate.
-    hourly_weather = {}
-    if not weather_log.empty:
-        for row in weather_log.groupby(['date_val', 'hour']).agg(
-                weather_score=('weather_score', lambda s: _mode_or(s, np.nan)),
-                temperature=('temperature', 'mean')).reset_index().itertuples():
-            hourly_weather[(row.date_val, row.hour)] = (row.weather_score, row.temperature)
-
-    rows = []
-    for day in context.itertuples():
-        is_game, is_playoff = game_info(day.date_val)
-        hours = sched.hour_buckets_sql(day.weekday, observed_hours.get(day.date_val, ()))
-        for hour in hours:
-            score, temperature = hourly_weather.get((day.date_val, hour),
-                                                    (day.weather_score, day.temperature))
-            if pd.isna(score):
-                score = day.weather_score
-            if pd.isna(temperature):
-                temperature = day.temperature
-            for fmt in FORMATS:
-                rows.append({
-                    'date_val': day.date_val,
-                    'weekday': day.weekday,
-                    'hour': hour,
-                    'weather_score': score,
-                    'temperature': temperature,
-                    'is_game_day': is_game,
-                    'is_playoff_game': is_playoff,
-                    'bag_format': fmt,
-                })
-
-    grid = pd.DataFrame(rows)
-    actual = sales.groupby(['date_val', 'hour', 'bag_format']).size().reset_index(name='sales')
-    final = pd.merge(grid, actual, on=['date_val', 'hour', 'bag_format'], how='left')
-    final['sales'] = final['sales'].fillna(0)
-    return final
+def _fit(inputs, as_of):
+    return forecast.fit(inputs["daily"], inputs["baskets"], inputs["profile"], as_of,
+                        **inputs["fit_kwargs"])
 
 
 # ---------------------------------------------------------------------------
-# Fitting and evaluation
+# Safety check
 # ---------------------------------------------------------------------------
 
-def _fit(dataset):
-    """One RandomForest per bag format."""
-    models = {}
-    for fmt in FORMATS:
-        rows = dataset[dataset['bag_format'] == fmt]
-        if rows.empty:
-            continue
-        regr = RandomForestRegressor(**RF_PARAMS)
-        regr.fit(rows[FEATURE_COLUMNS], rows['sales'])
-        models[fmt] = regr
-    return models
-
-
-def _baseline_prediction(train_rows, test_rows):
+def _light_gate(inputs):
     """
-    The forecast to beat: the mean sales for that weekday and hour, learned
-    from the training days alone.
-
-    Without this there is no way to tell whether the forest is adding
-    anything over "the same weekday usually sells about this much", which is
-    what a member of staff would guess unaided.
+    D+1 error on the day's total over the last GATE_DAYS trading days,
+    model vs same-weekday mean, each fitted only on days before the eve.
     """
-    means = train_rows.groupby(['weekday', 'hour'])['sales'].mean()
-    overall = train_rows['sales'].mean()
-    keys = list(zip(test_rows['weekday'], test_rows['hour']))
-    return np.array([means.get(key, overall) for key in keys], dtype=float)
-
-
-def _evaluate(dataset):
-    """
-    Holdout metrics on the most recent days.
-
-    The split is chronological, never random: sales are a time series, and a
-    random split would leak the same day's other hours into training and
-    report a flatteringly low error.
-    """
-    days = sorted(dataset['date_val'].unique())
-    if len(days) < MIN_DAYS_FOR_METRICS:
-        return {"status": "insufficient_data", "n_days": len(days)}
-
-    n_holdout = max(2, int(round(len(days) * HOLDOUT_FRACTION)))
-    holdout_days = set(days[-n_holdout:])
-    train = dataset[~dataset['date_val'].isin(holdout_days)]
-    test = dataset[dataset['date_val'].isin(holdout_days)]
-    if train.empty or test.empty:
-        return {"status": "insufficient_data", "n_days": len(days)}
-
-    per_format = {}
+    daily = inputs["daily"]
     model_errors, baseline_errors = [], []
-    for fmt in FORMATS:
-        train_rows = train[train['bag_format'] == fmt]
-        test_rows = test[test['bag_format'] == fmt]
-        if train_rows.empty or test_rows.empty:
+    for row in daily.tail(GATE_DAYS).itertuples(index=False):
+        cutoff = row.date - timedelta(days=1)
+        model = _fit(inputs, cutoff)
+        past = daily[daily["date"] < cutoff]
+        same = past[past["weekday"] == row.weekday]
+        if model is None or same.empty:
             continue
-
-        regr = RandomForestRegressor(**RF_PARAMS)
-        regr.fit(train_rows[FEATURE_COLUMNS], train_rows['sales'])
-
-        actual = test_rows['sales'].to_numpy(dtype=float)
-        predicted = regr.predict(test_rows[FEATURE_COLUMNS])
-        baseline = _baseline_prediction(train_rows, test_rows)
-
-        model_abs = np.abs(predicted - actual)
-        baseline_abs = np.abs(baseline - actual)
-        model_errors.append(model_abs)
-        baseline_errors.append(baseline_abs)
-
-        # Error on the day's total, which is what staff actually act on,
-        # rather than on individual hours.
-        daily = (test_rows.assign(pred=predicted)
-                 .groupby('date_val')
-                 .agg(actual_total=('sales', 'sum'), pred_total=('pred', 'sum')))
-        daily_total_mae = float((daily['pred_total'] - daily['actual_total']).abs().mean())
-
-        per_format[fmt] = {
-            "mae": round(float(model_abs.mean()), 3),
-            "baseline_mae": round(float(baseline_abs.mean()), 3),
-            "daily_total_mae": round(daily_total_mae, 2),
-        }
-
-    if not per_format:
-        return {"status": "insufficient_data", "n_days": len(days)}
-
-    mae = float(np.concatenate(model_errors).mean())
-    baseline_mae = float(np.concatenate(baseline_errors).mean())
-    return {
-        "status": "ok",
-        "n_days": len(days),
-        "n_holdout_days": len(holdout_days),
-        "mae": round(mae, 3),
-        "baseline_mae": round(baseline_mae, 3),
-        # >1 means the model beats the same-weekday average; <=1 means it
-        # is not earning its complexity yet.
-        "improvement_vs_baseline": round(baseline_mae / mae, 2) if mae > 0 else None,
-        "per_format": per_format,
-    }
+        predicted = sum(forecast.mean(model, row.date, fmt) for fmt in FORMATS)
+        model_errors.append(abs(predicted - row.total))
+        baseline_errors.append(abs(same["total"].mean() - row.total))
+    if not model_errors:
+        return {"mae": None, "baseline_mae": None, "n_days": 0}
+    return {"mae": round(float(np.mean(model_errors)), 2),
+            "baseline_mae": round(float(np.mean(baseline_errors)), 2),
+            "n_days": len(model_errors)}
 
 
-def _weekday_coverage(dataset):
-    """
-    How many distinct days of history exist per weekday, and which of those
-    are too thin to trust. Surfaced in the UI so nobody reads a Wednesday
-    forecast built on seven Wednesdays as though it were a Sunday forecast
-    built on twenty-one.
-    """
-    days = dataset[['date_val', 'weekday']].drop_duplicates()
-    counts = {int(w): int(n) for w, n in days.groupby('weekday').size().items()}
-    return {
-        "days_per_weekday": counts,
-        "thin_weekdays": sorted(w for w, n in counts.items() if n < THIN_COVERAGE_DAYS),
-        "threshold": THIN_COVERAGE_DAYS,
-    }
+def _has_current_payload(path):
+    try:
+        payload = joblib.load(path)
+    except Exception:
+        return False
+    return isinstance(payload, dict) and payload.get("version") == PAYLOAD_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -391,79 +164,87 @@ def save_model_payload(payload, path=MODEL_PATH):
 
 def train_model(db_name=DB_NAME, model_path=MODEL_PATH):
     """
-    Retrain from scratch and persist. Returns the metrics dict, or None when
-    there wasn't enough data to train at all.
+    Fit as of today, check it, persist it, and record the recommendations it
+    makes for the upcoming open days. Returns the metrics dict, or None when
+    there is not enough history to fit at all.
     """
     print(">>> Training model...")
+    now = now_local()
+    today = now.date()
     conn = sqlite3.connect(db_name, timeout=30.0)
     try:
-        sales = _load_sales(conn)
-        weather_log = _load_weather_log(conn)
+        # The tables this writes to may not exist yet on a database the app
+        # never opened; creating them is additive and idempotent.
+        forecast_log.init_table(conn)
+        inputs = _fit_inputs(conn, today)
     finally:
         conn.close()
 
-    if sales.empty:
-        print("No sales logged yet.")
+    model = _fit(inputs, today)
+    if model is None:
+        print(f"Not enough history to fit ({len(inputs['daily'])} trading days, "
+              f"need {forecast.MIN_FIT_DAYS}).")
         return None
 
-    # EXCLUDE TODAY: prevents poisoning the model with incomplete afternoon
-    # hours, which would look like a collapse in demand after lunch.
-    today_str = now_local().strftime('%Y-%m-%d')
-    sales = sales[sales['date_val'] < today_str]
-    if sales.empty:
-        print("No past valid data for training.")
-        return None
+    gate = _light_gate(inputs)
+    loses = gate["mae"] is not None and gate["mae"] > gate["baseline_mae"]
+    broken = gate["mae"] is not None and gate["mae"] > gate["baseline_mae"] * GATE_TOLERANCE
+    metrics = {"status": "ok", "gate": gate, "n_days": len(inputs["daily"])}
 
-    # Drop days that look like a partial log rather than a quiet day.
-    counts_per_day = sales.groupby('date_val').size()
-    sales = sales[sales['date_val'].isin(counts_per_day[counts_per_day >= MIN_LOGS_THRESHOLD].index)]
-    if sales.empty:
-        print(f"No day reached {MIN_LOGS_THRESHOLD} logged sales.")
-        return None
-
-    sales = _prepare_sales(sales)
-    if not weather_log.empty:
-        weather_log = weather_log[weather_log['date_val'] < today_str]
-
-    dataset = _build_grid(sales, weather_log)
-
-    metrics = _evaluate(dataset)
-    metrics.update(_weekday_coverage(dataset))
-
-    models = _fit(dataset)
-    if not models:
-        print("Nothing to fit.")
-        return None
+    if broken and _has_current_payload(model_path):
+        print(f"Nightly fit rejected: MAE {gate['mae']} vs baseline {gate['baseline_mae']}; "
+              f"keeping previous model.")
+        metrics["status"] = "rejected"
+        return metrics
 
     save_model_payload({
-        "models": models,
-        "feature_columns": list(FEATURE_COLUMNS),
-        "formats": list(FORMATS),
+        "version": PAYLOAD_VERSION,
+        "demand_model": model,
         "metrics": metrics,
-        "trained_at": now_local().strftime("%Y-%m-%d %H:%M:%S"),
-        "n_training_rows": int(len(dataset)),
+        "trained_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "switches": {"events": forecast.USE_EVENTS, "nhl": forecast.USE_NHL,
+                     "weather": forecast.USE_WEATHER, "temperature": forecast.USE_TEMPERATURE},
     }, model_path)
 
-    # The server log is where model quality lives: the counter UI deliberately
-    # shows staff a forecast and its range, not diagnostics.
-    if metrics.get("status") == "ok":
-        verdict = ("beats" if metrics["baseline_mae"] > metrics["mae"] else "LOSES TO")
-        print(f"Training complete. Holdout MAE {metrics['mae']} {verdict} the "
-              f"same-weekday-hour baseline {metrics['baseline_mae']} "
-              f"(ratio {metrics['improvement_vs_baseline']}) over "
-              f"{metrics['n_holdout_days']} of {metrics['n_days']} days.")
-    else:
-        print(f"Training complete. Not enough history for holdout metrics "
-              f"({metrics.get('n_days', 0)} days).")
+    _record_forecasts(db_name, model, now)
 
-    thin = metrics.get("thin_weekdays") or []
-    if thin:
-        counts = metrics.get("days_per_weekday", {})
-        detail = ", ".join(f"{sched.WEEKDAY_NAMES_FR[sched.py_weekday_from_sql(w)]}={counts.get(w, 0)}"
-                           for w in thin)
-        print(f"  Thin weekday coverage (under {metrics['threshold']} days): {detail}")
+    # The server log is where model quality lives: the counter UI shows staff
+    # a recommendation and its margin, not diagnostics.
+    if gate["mae"] is None:
+        print(f"Training complete. Not enough history for the check ({metrics['n_days']} days).")
+    else:
+        verdict = "LOSES TO" if loses else "beats"
+        print(f"Training complete. D+1 MAE {gate['mae']} {verdict} the same-weekday mean "
+              f"{gate['baseline_mae']} over the last {gate['n_days']} days.")
     return metrics
 
 
+def _record_forecasts(db_name, model, now):
+    """What this model recommends for each upcoming open day, as of now."""
+    weekly = None
+    if forecast.USE_WEATHER or forecast.USE_TEMPERATURE:
+        weekly = get_weekly_forecast()
+    rows = []
+    for day in sched.upcoming_open_days(now.date()):
+        kwargs = day_inputs(day, db_name, weekly)
+        for fmt in FORMATS:
+            rows.append({"target_date": day.strftime("%Y-%m-%d"), "format": fmt,
+                         "horizon_days": (day - now.date()).days,
+                         "expected": forecast.mean(model, day, fmt, **kwargs),
+                         "recommended": forecast.recommend(model, day, fmt, **kwargs)})
+    conn = sqlite3.connect(db_name, timeout=30.0)
+    try:
+        forecast_log.record(conn, rows, now)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def main():
+    """Command-line run, pointed at the same files as the app (METALGO_DB / METALGO_MODEL)."""
+    return train_model(os.environ.get("METALGO_DB", DB_NAME),
+                       os.environ.get("METALGO_MODEL", MODEL_PATH))
+
+
 if __name__ == "__main__":
-    train_model()
+    main()

@@ -256,8 +256,7 @@ function renderPrediction(data) {
             const high = (data.previsions_max || {})[fmt];
 
             setText(`pred-${fmt}`, data.previsions[fmt] || 0);
-            // Spread across the forest's trees: computed server-side all
-            // along, discarded by the old UI.
+            // 10th to 90th percentile of the day's total.
             setText(`range-${fmt}`,
                 (low === undefined || high === undefined) ? '' : `${low} – ${high}`);
         });
@@ -398,23 +397,23 @@ function loadWeeklyForecast() {
         .then(data => {
             if (loading) loading.style.display = 'none';
 
-            if (!Array.isArray(data) || data.error || data.length === 0) {
+            if (!Array.isArray(data) || data.length === 0) {
                 container.innerHTML =
                     '<div class="model-status-text" style="text-align:center;">Données indisponibles.</div>';
                 return;
             }
 
-            container.innerHTML = data.filter(jour => !jour.ferme).map(jour => {
+            container.innerHTML = data.map(jour => {
                 const cols = FORMATS.map(fmt => {
-                    const total = (jour.totals || {})[fmt];
-                    return `<div class="w-col"><span class="v ${FORMAT_CLASSES[fmt]}">${esc(total === undefined ? 0 : total)}</span>` +
+                    const bags = (jour.recommande || {})[fmt];
+                    return `<div class="w-col"><span class="v ${FORMAT_CLASSES[fmt]}">${esc(bags === undefined ? '–' : bags)}</span>` +
                            `<span class="l">${esc(FORMAT_LABELS[fmt])}</span></div>`;
                 }).join('');
 
                 return `<div class="week-card">
                     <div class="week-header">
                         <span class="week-date">${esc(jour.date_affichee)}</span>
-                        <span class="week-meteo">${esc(jour.meteo)}</span>
+                        <span class="week-meteo">${esc(jour.evenement || '')}</span>
                     </div>
                     <div class="week-data">${cols}</div>
                 </div>`;

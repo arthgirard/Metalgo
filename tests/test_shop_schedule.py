@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -94,32 +94,32 @@ class TestHourBuckets:
         assert sched.hour_buckets(MONDAY, [11]) == [11]
 
 
-class TestModelHyperparameters:
+class TestClosedDates:
     """
-    Guards for two settings that were measured, not guessed. Both were
-    changed because the forest scored WORSE than a same-weekday-and-hour
-    average (ratio 0.91); see the notes in train_model.py.
+    The shop shuts on Christmas Day and New Year's Day whatever weekday they
+    fall on. Training already ignores those days (no sales), but the planning
+    screen, the weather sampler and the open/closed pill must know too.
     """
 
-    def test_depth_is_capped(self):
-        import train_model
-        # Unconstrained, the forest memorised individual days: training error
-        # ran at less than half the holdout error.
-        assert train_model.RF_PARAMS.get("max_depth") is not None
-        assert train_model.RF_PARAMS["max_depth"] <= 6
+    def test_christmas_and_new_year_are_closed(self):
+        assert sched.is_closed_on(date(2026, 12, 25))   # a Friday
+        assert sched.is_closed_on(date(2027, 1, 1))     # a Friday
+        assert sched.selling_hours_on(date(2026, 12, 25)) == range(0)
 
-    def test_fit_and_evaluation_share_hyperparameters(self):
-        """Otherwise the reported metrics describe a model nobody ships."""
-        import inspect, train_model
-        for fn in (train_model._fit, train_model._evaluate):
-            source = inspect.getsource(fn)
-            assert "RandomForestRegressor(**RF_PARAMS)" in source, fn.__name__
+    def test_mondays_still_closed_and_other_days_open(self):
+        assert sched.is_closed_on(date(2026, 10, 19))
+        assert not sched.is_closed_on(date(2026, 12, 24))
+        assert sched.selling_hours_on(date(2026, 12, 24)) == range(10, 18)  # a Thursday: late close
 
-    def test_day_mean_temperature_is_not_a_feature(self):
-        """
-        Stored as a daily mean it was a unique fingerprint per day (61 days,
-        61 distinct values, smallest gap 0.046 °C) rather than a weather
-        signal. It may return once per-hour readings accumulate.
-        """
-        import train_model
-        assert "temperature" not in train_model.FEATURE_COLUMNS
+    def test_not_open_at_noon_on_christmas(self):
+        assert not sched.is_open_at(datetime(2026, 12, 25, 12, 0))
+
+
+class TestUpcomingOpenDays:
+    def test_today_and_the_next_seven_calendar_days_minus_closures(self):
+        # Saturday 19 December 2026: Monday 21 and Christmas (Friday 25) drop out.
+        days = sched.upcoming_open_days(date(2026, 12, 19))
+        assert days == [date(2026, 12, d) for d in (19, 20, 22, 23, 24, 26)]
+
+    def test_a_closed_start_day_is_skipped(self):
+        assert sched.upcoming_open_days(date(2026, 10, 19))[0] == date(2026, 10, 20)
