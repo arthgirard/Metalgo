@@ -405,8 +405,10 @@ function loadWeeklyForecast() {
 
             container.innerHTML = data.map(jour => {
                 const cols = FORMATS.map(fmt => {
-                    const bags = (jour.recommande || {})[fmt];
-                    return `<div class="w-col"><span class="v ${FORMAT_CLASSES[fmt]}">${esc(bags === undefined ? '–' : bags)}</span>` +
+                    // Expected sales, not the bagging recommendation: the
+                    // 90th percentile + 1 read as a forecast beat records.
+                    const expected = (jour.attendu || {})[fmt];
+                    return `<div class="w-col"><span class="v ${FORMAT_CLASSES[fmt]}">${esc(expected === undefined ? '–' : Math.round(expected))}</span>` +
                            `<span class="l">${esc(FORMAT_LABELS[fmt])}</span></div>`;
                 }).join('');
 
