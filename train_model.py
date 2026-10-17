@@ -220,7 +220,7 @@ def train_model(db_name=DB_NAME, model_path=MODEL_PATH):
 
 
 def _record_forecasts(db_name, model, now):
-    """What this model recommends for each upcoming open day, as of now."""
+    """What this model expects to sell on each upcoming open day, as of now."""
     weekly = None
     if forecast.USE_WEATHER or forecast.USE_TEMPERATURE:
         weekly = get_weekly_forecast()
@@ -230,8 +230,7 @@ def _record_forecasts(db_name, model, now):
         for fmt in FORMATS:
             rows.append({"target_date": day.strftime("%Y-%m-%d"), "format": fmt,
                          "horizon_days": (day - now.date()).days,
-                         "expected": forecast.mean(model, day, fmt, **kwargs),
-                         "recommended": forecast.recommend(model, day, fmt, **kwargs)})
+                         "expected": forecast.mean(model, day, fmt, **kwargs)})
     conn = sqlite3.connect(db_name, timeout=30.0)
     try:
         forecast_log.record(conn, rows, now)

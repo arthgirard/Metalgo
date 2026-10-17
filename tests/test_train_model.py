@@ -61,14 +61,33 @@ def test_forecast_log_gets_the_upcoming_open_days(app_module, trainer):
     import shop_schedule as sched
     _train(app_module, trainer)
     with app_module.get_conn() as conn:
-        rows = conn.execute("SELECT target_date, format, issued_at, horizon_days, recommended "
+        rows = conn.execute("SELECT target_date, format, issued_at, horizon_days, expected "
                             "FROM forecast_log").fetchall()
     days = sched.upcoming_open_days(NOW.date())
     assert {r[0] for r in rows} == {d.strftime("%Y-%m-%d") for d in days}
     assert len(rows) == 3 * len(days)
     assert {r[2] for r in rows} == {"2026-10-17 03:00:00"}
     assert all(0 <= r[3] <= 7 for r in rows)
-    assert all(r[4] >= 0 for r in rows)
+    assert all(r[4] > 0 for r in rows)
+
+
+def test_forecast_log_drops_the_old_recommended_column(app_module, trainer):
+    """Expected sales only: the 90th-percentile recommendation is no longer logged."""
+    with app_module.get_conn() as conn:
+        conn.execute("DROP TABLE forecast_log")
+        conn.execute("""CREATE TABLE forecast_log (
+            id INTEGER PRIMARY KEY, target_date TEXT NOT NULL, format TEXT NOT NULL,
+            issued_at TEXT NOT NULL, horizon_days INTEGER NOT NULL,
+            expected REAL NOT NULL, recommended INTEGER NOT NULL)""")
+        conn.execute("INSERT INTO forecast_log (target_date, format, issued_at, horizon_days, "
+                     "expected, recommended) VALUES ('2026-10-16', '1kg', '2026-10-16 03:00:00', "
+                     "0, 30.5, 42)")
+    _train(app_module, trainer)
+    with app_module.get_conn() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(forecast_log)")}
+        kept = conn.execute("SELECT expected FROM forecast_log WHERE target_date = '2026-10-16'").fetchall()
+    assert "recommended" not in columns
+    assert kept == [(30.5,)]
 
 
 def test_old_forest_payload_is_ignored(app_module):

@@ -97,7 +97,7 @@ Each night the new fit is checked over the last 14 days at D+1 against the
 same-weekday mean. It is rejected, and the previous model kept, only if its
 error is more than 1.25× the baseline's (`GATE_TOLERANCE`): on two weeks of
 data a good model can lose narrowly by chance. Each fit also writes its
-recommendations for the coming open days into `forecast_log`, so the
+expected sales for the coming open days into `forecast_log`, so the
 forecasts can later be compared with what happened.
 
 ### Evaluation
@@ -146,8 +146,9 @@ Two weekday conventions coexist: `daily_snapshots.weekday` and the demand
 model use Python's (Monday = 0), while SQL queries read SQLite's
 `strftime('%w')` (Sunday = 0). All conversions go through `shop_schedule.py`.
 
-`forecast_log` (`forecast_log.py`) keeps every nightly recommendation, so
-forecasts can later be compared with what sold. Databases that ran an
+`forecast_log` (`forecast_log.py`) keeps every nightly forecast of expected
+sales, so forecasts can later be compared with what sold. Its first build
+also logged the bagging recommendation; that column is dropped on startup. Databases that ran an
 earlier build may also hold empty `bagging_plan`, `conversions` and
 `closing_record` tables; nothing reads them.
 
