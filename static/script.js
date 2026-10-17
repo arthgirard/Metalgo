@@ -263,6 +263,23 @@ function renderPrediction(data) {
         });
     }
 
+    const endStock = el('end-stock');
+    if (endStock) {
+        if (data.stock_fin_prevu) {
+            el('end-stock-row').innerHTML = FORMATS.map(fmt => {
+                // Negative means the rest of the day should ask for more bags
+                // than are left: shown as the shortfall, not as "-14".
+                const n = data.stock_fin_prevu[fmt];
+                const value = n < 0 ? `rupture (manque ${esc(-n)})` : esc(n);
+                return `<span class="${n <= 0 ? 'stock-out' : FORMAT_CLASSES[fmt]}">` +
+                       `${esc(FORMAT_LABELS[fmt])} : ${value}</span>`;
+            }).join('');
+            endStock.style.display = 'block';
+        } else {
+            endStock.style.display = 'none';
+        }
+    }
+
     setText('prediction-info', data.debug_info || 'Modèle prêt');
     renderTrend(data.debug_info);
 }
@@ -291,6 +308,125 @@ function renderTrend(debugInfo) {
         trendContainer.className = 'trend-badge stable';
         badgeText.innerText = `Tendance stable (${percent}%)`;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stock and closing
+// ---------------------------------------------------------------------------
+
+let stockData = null;
+
+function stockCell(fmt, entry) {
+    let value;
+    if (entry.status === 'incoherent') {
+        value = '<span class="stock-warn">⚠ stock incohérent</span>' +
+                '<span class="stock-hint">Vérifier le plan du jour</span>';
+    } else if (entry.remaining <= 0 && entry.status === 'sold_out') {
+        value = '<span class="stock-val stock-out">Épuisé</span>';
+    } else {
+        const cls = entry.remaining <= 0 ? 'stock-out' : FORMAT_CLASSES[fmt];
+        value = `<span class="stock-val ${cls}">${esc(entry.remaining)}</span>`;
+    }
+    return `<div class="w-col">${value}<span class="l">${esc(FORMAT_LABELS[fmt])}</span></div>`;
+}
+
+function updateStock() {
+    const strip = el('stock-strip');
+    if (!strip) return;
+    fetch('/api/stock')
+        .then(res => res.json())
+        .then(data => {
+            stockData = data;
+            if (!data.plan) {
+                strip.innerHTML = '<div class="hist-empty">Aucun plan pour aujourd\'hui</div>';
+                return;
+            }
+            strip.innerHTML = `<div class="week-data">${
+                FORMATS.map(fmt => stockCell(fmt, data.formats[fmt] || {})).join('')}</div>`;
+            if (el('closing-sheet').style.display !== 'none') renderClosing();
+        })
+        .catch(err => console.error(err));
+}
+
+function renderClosing() {
+    const data = stockData || {};
+    const list = el('conversion-list');
+    const conversions = data.conversions || [];
+    list.innerHTML = conversions.length ? conversions.map(c =>
+        `<div class="hist-row"><span>${esc(c.source_bags)} × ${esc(FORMAT_LABELS[c.source] || c.source)} → ` +
+        `${esc(c.produced_bags)} × ${esc(FORMAT_LABELS[c.target] || c.target)}</span>` +
+        `<button class="btn-cancel" aria-label="Supprimer" onclick="deleteConversion(${Number(c.id)})">✕</button></div>`
+    ).join('') : '<div class="hist-empty">Aucun sac reconditionné</div>';
+    setText('closing-status', data.cloture ? `Clôture enregistrée ${data.cloture.saved_at.slice(11, 16)}` : '');
+}
+
+function openClosing() {
+    el('closing-sheet').style.display = 'flex';
+    el('closing-error').style.display = 'none';
+    // Prefilled once on open, not on every refresh, so a refresh never
+    // overwrites a number someone is typing.
+    const leftovers = (stockData && stockData.cloture && stockData.cloture.leftovers) || {};
+    FORMATS.forEach(fmt => {
+        const v = leftovers[fmt];
+        el(`left-${fmt}`).value = v === null || v === undefined ? '' : v;
+    });
+    renderClosing();
+    updateStock();
+}
+
+function closeClosing() {
+    el('closing-sheet').style.display = 'none';
+}
+
+function closingError(message) {
+    const node = el('closing-error');
+    node.textContent = message;
+    node.style.display = 'block';
+}
+
+function postJson(url, method, body) {
+    return fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+    }).then(res => res.json().then(data => ({ ok: res.ok, data })));
+}
+
+function addConversion() {
+    const [source, target] = el('conv-pair').value.split('>');
+    const bags = Number(el('conv-bags').value);
+    postJson('/api/conversion', 'POST', { source, target, source_bags: bags })
+        .then(({ ok, data }) => {
+            if (!ok) return closingError(data.message || 'Erreur');
+            el('closing-error').style.display = 'none';
+            updateStock();
+        })
+        .catch(() => closingError('Connexion impossible, réessayez.'));
+}
+
+function deleteConversion(id) {
+    postJson(`/api/conversion/${id}`, 'DELETE')
+        .then(({ ok, data }) => {
+            if (!ok) return closingError(data.message || 'Erreur');
+            updateStock();
+        })
+        .catch(() => closingError('Connexion impossible, réessayez.'));
+}
+
+function saveClosing() {
+    const values = {};
+    let any = false;
+    FORMATS.forEach(fmt => {
+        const raw = el(`left-${fmt}`).value.trim();
+        if (raw !== '') { values[fmt] = Number(raw); any = true; }
+    });
+    postJson('/api/closing', 'POST', { leftovers: any ? values : null })
+        .then(({ ok, data }) => {
+            if (!ok) return closingError(data.message || 'Erreur');
+            el('closing-error').style.display = 'none';
+            updateStock();
+        })
+        .catch(() => closingError('Connexion impossible, réessayez.'));
 }
 
 // ---------------------------------------------------------------------------
@@ -629,9 +765,10 @@ document.addEventListener('DOMContentLoaded', () => {
     flushQueue();
     updateStats();
     updateHistory();
+    updateStock();
     checkOpenStatus();
 
-    setInterval(() => { updateStats(); updateHistory(); }, REFRESH_MS);
+    setInterval(() => { updateStats(); updateHistory(); updateStock(); }, REFRESH_MS);
     setInterval(checkOpenStatus, STATUS_MS);
     setInterval(flushQueue, FLUSH_MS);
 

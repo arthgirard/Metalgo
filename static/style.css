@@ -206,3 +206,28 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 .day-totals { display: flex; gap: 16px; }
 .day-total-col { display: flex; flex-direction: column; align-items: center; }
 .day-expand { padding: 0 16px 16px 16px; }
+
+/* Saisie: stock left on the counter */
+.stock-strip { margin-top: 12px; }
+.stock-val { font-weight: 800; font-size: 1.4rem; display: block; }
+.stock-out { color: var(--danger) !important; font-weight: 800; }
+.stock-warn { display: block; font-size: 0.8rem; font-weight: 700; color: var(--brand-accent); }
+.stock-hint { display: block; font-size: 0.7rem; color: var(--text-muted); font-weight: 600; }
+
+/* Aujourd'hui: what should be left at closing */
+.end-stock { margin-top: 16px; text-align: center; }
+.end-stock-title { display: block; font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-bottom: 6px; }
+.end-stock-row { display: flex; justify-content: center; gap: 16px; font-size: 0.9rem; font-weight: 700; flex-wrap: wrap; }
+
+/* Clôture sheet */
+.sheet-backdrop { position: fixed; inset: 0; background: rgba(61, 52, 43, 0.4); display: flex; align-items: flex-end; justify-content: center; z-index: 10; }
+.sheet { background: var(--bg-card); width: 100%; max-width: 560px; max-height: 85vh; overflow-y: auto; box-sizing: border-box; border-radius: 16px 16px 0 0; padding: 20px 16px calc(20px + env(safe-area-inset-bottom)); }
+.sheet-sub { font-size: 0.85rem; font-weight: 700; color: var(--text-muted); margin: 20px 0 8px; }
+.conversion-list { display: flex; flex-direction: column; gap: 6px; }
+.conversion-form { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; font-size: 0.9rem; font-weight: 600; }
+.sheet-input { width: 64px; box-sizing: border-box; text-align: center; font-size: 1rem; font-weight: 700; padding: 8px 4px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-app); }
+.sheet-select { font-size: 0.9rem; padding: 8px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-app); }
+.leftover-grid { display: flex; gap: 8px; }
+.leftover-grid label { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 0.75rem; font-weight: 600; color: var(--text-muted); }
+.leftover-grid .sheet-input { width: 100%; }
+.btn-primary { background: var(--brand-action); color: white; border-color: var(--brand-action); }
