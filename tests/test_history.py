@@ -97,16 +97,6 @@ class TestHourlyProfile:
         assert profile["late"] == {17: pytest.approx(1.0)}
 
 
-class TestSalesTimes:
-    def test_sorted_times_per_format(self, app_module, history):
-        _insert(app_module, "2026-08-18 12:00:00", "1kg")
-        _insert(app_module, "2026-08-18 11:00:00", "1kg")
-        with app_module.get_conn() as conn:
-            times = history.sales_times(conn, date(2026, 8, 18))
-        assert times["1kg"] == [datetime(2026, 8, 18, 11), datetime(2026, 8, 18, 12)]
-        assert times["250g"] == [] and times["2kg"] == []
-
-
 class TestDailyWeather:
     def test_sampler_readings_win_over_sale_labels(self, app_module, history):
         _fill_day(app_module, "2026-08-18", n=12)       # sale labels say "Ensoleillé" (2)

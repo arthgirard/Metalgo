@@ -1,4 +1,3 @@
-import math
 import os
 import re
 import sqlite3
@@ -11,11 +10,11 @@ import joblib
 from flask import Flask, jsonify, render_template, request
 
 import shop_schedule as sched
-import stock
 from event_service import get_event_key, get_game_info, get_special_event
 from meteo import (get_current_weather, get_weekly_forecast, now_local, today_local,
                    weather_score_from_label)
 import forecast
+import forecast_log
 import history
 from train_model import PAYLOAD_VERSION, day_inputs, train_model
 
@@ -123,8 +122,7 @@ def init_db():
         _ensure_column(conn, "logs", "temperature", "REAL")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_date ON logs(action_type, timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_weather_log_ts ON weather_log(timestamp)")
-        # Plans, conversions, closings and the forecast record.
-        stock.init_tables(conn)
+        forecast_log.init_table(conn)
 
 
 def snapshot_completed_days():
@@ -397,7 +395,7 @@ def _build_prediction(now, real_sales):
         # deal with a differently-shaped payload on Mondays.
         return {"heures_restantes": 0, "meteo": weather_cond,
                 "previsions": dict(sold), "previsions_min": dict(sold), "previsions_max": dict(sold),
-                "evenement": None, "debug_info": "Fermé", "stock_fin_prevu": None}
+                "evenement": None, "debug_info": "Fermé"}
 
     open_hour, close_hour = sched.OPEN_HOUR, sched.close_hour(now.weekday())
     start_day = now.replace(hour=open_hour, minute=0, second=0, microsecond=0)
@@ -406,14 +404,12 @@ def _build_prediction(now, real_sales):
     event_name = get_special_event(now.date(), db_path=DB_NAME)[0]
 
     with get_conn() as conn:
-        status = stock.day_status(conn, now.strftime("%Y-%m-%d"))
         customers = history.customers_on(conn, now.date())
 
     model = get_demand_model()
     if model is None:
         predictions = dict(sold)
         low = high = dict(sold)
-        remaining = {fmt: 0.0 for fmt in formats}
         debug_msg = "Modèle manquant"
     else:
         out = forecast.intraday(model, now.date(), now, sold, customers,
@@ -421,12 +417,9 @@ def _build_prediction(now, real_sales):
         predictions = {fmt: f["point"] for fmt, f in out["formats"].items()}
         low = {fmt: f["low"] for fmt, f in out["formats"].items()}
         high = {fmt: f["high"] for fmt, f in out["formats"].items()}
-        remaining = {fmt: f["remaining"] for fmt, f in out["formats"].items()}
         # Read by the trend badge: the pace of the day against the model.
         debug_msg = f"{int(round(out['multiplier'] * 100))}%"
 
-    end_stock = (None if status is None else
-                 {fmt: status[fmt]["remaining"] - int(round(remaining[fmt])) for fmt in formats})
     return {
         "heures_restantes": round(time_left.total_seconds() / 3600, 1),
         "meteo": weather_cond,
@@ -435,109 +428,12 @@ def _build_prediction(now, real_sales):
         "previsions_max": high,
         "evenement": event_name,
         "debug_info": debug_msg,
-        "stock_fin_prevu": end_stock,
     }
 
 
 # ---------------------------------------------------------------------------
-# Stock, conversions and the end-of-day record
+# The week ahead
 # ---------------------------------------------------------------------------
-
-def _bag_count(value):
-    """A whole, plausible number of bags, or None. bool is excluded on purpose."""
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_PLAN_BAGS:
-        return None
-    return value
-
-
-@app.route('/api/stock')
-def get_stock():
-    today = today_local().strftime("%Y-%m-%d")
-    with get_conn() as conn:
-        status = stock.day_status(conn, today)
-        conversions = stock.get_conversions(conn, today)
-        closing = stock.get_closing(conn, today)
-    return jsonify({"date": today, "plan": status is not None, "formats": status or {},
-                    "conversions": conversions, "cloture": closing})
-
-
-@app.route('/api/conversion', methods=['POST'])
-def add_conversion():
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return _plan_error("Requête invalide")
-    bags = _bag_count(data.get("source_bags"))
-    if not bags:
-        return _plan_error("Nombre de sacs ouverts invalide")
-    try:
-        with get_conn() as conn:
-            conversion_id = stock.add_conversion(conn, today_local().strftime("%Y-%m-%d"),
-                                                 data.get("source"), data.get("target"), bags,
-                                                 now_local())
-    except ValueError:
-        return _plan_error("Conversion impossible")
-    return jsonify({"status": "success", "id": conversion_id})
-
-
-@app.route('/api/conversion/<int:conversion_id>', methods=['DELETE'])
-def delete_conversion(conversion_id):
-    """Only today's conversions can be removed; earlier days are history."""
-    today = today_local().strftime("%Y-%m-%d")
-    with get_conn() as conn:
-        row = conn.execute("SELECT date FROM conversions WHERE id = ?", (conversion_id,)).fetchone()
-        if row is None or row[0] != today:
-            return jsonify({"status": "error", "message": "Conversion introuvable"}), 404
-        stock.delete_conversion(conn, conversion_id)
-    return jsonify({"status": "success"})
-
-
-@app.route('/api/closing', methods=['POST'])
-def save_closing():
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return _plan_error("Requête invalide")
-    leftovers = data.get("leftovers")
-    if leftovers is not None:
-        if not isinstance(leftovers, dict) or not set(leftovers) <= set(sched.FORMATS):
-            return _plan_error("Restants invalides")
-        if any(_bag_count(v) is None for v in leftovers.values()):
-            return _plan_error("Restants invalides")
-    with get_conn() as conn:
-        stock.save_closing(conn, today_local().strftime("%Y-%m-%d"), leftovers, now_local())
-    return jsonify({"status": "success"})
-
-
-# A saved plan is flagged when the recommendation has since moved by at
-# least this much: two bags, or 15% of what was recommended at the time.
-CHANGE_NOTICE_MIN_BAGS = 2
-CHANGE_NOTICE_FRACTION = 0.15
-
-# Anything above this is a typo, not a plan.
-MAX_PLAN_BAGS = 999
-
-
-def _changed(stored, current):
-    """Formats whose recommendation moved materially since the plan was saved."""
-    moved = {}
-    for fmt, then in (stored or {}).items():
-        now = current.get(fmt)
-        if now is not None and abs(now - then) >= max(CHANGE_NOTICE_MIN_BAGS,
-                                                      math.ceil(CHANGE_NOTICE_FRACTION * then)):
-            moved[fmt] = now
-    return moved or None
-
-
-def _last_week(conn, day):
-    """The same weekday a week earlier, as the planner used to read it off paper."""
-    then = (day - timedelta(days=7)).strftime("%Y-%m-%d")
-    status = stock.day_status(conn, then, ended=True) or {}
-    return {
-        "date": then,
-        "conversions": stock.get_conversions(conn, then),
-        "ruptures": [fmt for fmt, e in status.items() if e["status"] == "sold_out"],
-        "incoherent": [fmt for fmt, e in status.items() if e["status"] == "incoherent"],
-    }
-
 
 def _recommendations(model, day, weekly):
     """(expected, recommended) per format for `day`, or two empty dicts without a model."""
@@ -549,81 +445,31 @@ def _recommendations(model, day, weekly):
     return expected, recommended
 
 
-@app.route('/api/plan')
-def get_plan():
+@app.route('/api/forecast_week')
+def forecast_week():
     """
     Today and the following seven calendar days that are open, each with the
-    recommendation, any saved plan, and last week's same weekday.
+    expected sales and the bags to prepare per format.
 
-    The planner often fills a whole weekend in two days ahead, so nothing
+    The planner often prepares a whole weekend two days ahead, so nothing
     here assumes anyone looks at it on the morning itself.
     """
     today = today_local()
     model = get_demand_model()
-    weekly = {d["date"]: d for d in get_weekly_forecast()}
-    days = sched.upcoming_open_days(today)
-
-    with get_conn() as conn:
-        plans = stock.get_plans(conn, [d.strftime("%Y-%m-%d") for d in days])
-        result = []
-        for day in days:
-            key = day.strftime("%Y-%m-%d")
-            expected, recommended = _recommendations(model, day, list(weekly.values()))
-            plan = plans.get(key)
-            forecast_day = weekly.get(key) or {}
-            result.append({
-                "date": key,
-                "date_affichee": f"{sched.WEEKDAY_NAMES_FR[day.weekday()]} {day.day}",
-                "meteo": forecast_day.get("description"),
-                "temperature": forecast_day.get("temperature"),
-                "evenement": get_special_event(day, db_path=DB_NAME)[0],
-                "attendu": expected,
-                "recommande": recommended,
-                # The risk the recommendation is built to, shown on the card
-                # so the planner knows what "Recommandé" promises.
-                "cible_rupture": forecast.SELLOUT_TARGET,
-                "plan": plan["bags"] if plan else None,
-                "plan_maj": plan["updated_at"] if plan else None,
-                "changement": _changed(plan["recommended"], recommended) if plan else None,
-                "semaine_derniere": _last_week(conn, day),
-            })
+    weekly = get_weekly_forecast() if (forecast.USE_WEATHER or forecast.USE_TEMPERATURE) else []
+    result = []
+    for day in sched.upcoming_open_days(today):
+        expected, recommended = _recommendations(model, day, weekly)
+        result.append({
+            "date": day.strftime("%Y-%m-%d"),
+            "date_affichee": f"{sched.WEEKDAY_NAMES_FR[day.weekday()]} {day.day}",
+            "evenement": get_special_event(day, db_path=DB_NAME)[0],
+            "attendu": expected,
+            "recommande": recommended,
+            # The risk the recommendation is built to, shown with the list.
+            "cible_rupture": forecast.SELLOUT_TARGET,
+        })
     return jsonify(result)
-
-
-def _plan_error(message):
-    return jsonify({"status": "error", "message": message}), 400
-
-
-@app.route('/api/plan', methods=['POST'])
-def save_plan():
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return _plan_error("Requête invalide")
-
-    raw_date = data.get("date")
-    if not isinstance(raw_date, str) or not _DATE_RE.match(raw_date):
-        return _plan_error("Date invalide")
-    try:
-        day = datetime.strptime(raw_date, "%Y-%m-%d").date()
-    except ValueError:
-        return _plan_error("Date invalide")
-    if day not in sched.upcoming_open_days(today_local()):
-        return _plan_error("Jour fermé ou hors de la période de planification")
-
-    bags = data.get("bags")
-    if not isinstance(bags, dict) or set(bags) != set(sched.FORMATS):
-        return _plan_error("Il faut un nombre pour chaque format")
-    for fmt, count in bags.items():
-        # bool is an int subclass; True would otherwise be stored as 1 bag.
-        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= MAX_PLAN_BAGS:
-            return _plan_error(f"Nombre invalide pour {fmt}")
-
-    _, recommended = _recommendations(get_demand_model(), day,
-                                      get_weekly_forecast() if (forecast.USE_WEATHER or
-                                                                forecast.USE_TEMPERATURE) else [])
-    with get_conn() as conn:
-        stock.save_plan(conn, raw_date, bags, recommended or None, now_local())
-    return jsonify({"status": "success"})
 
 
 @app.route('/api/retrain', methods=['POST'])

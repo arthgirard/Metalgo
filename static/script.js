@@ -256,28 +256,10 @@ function renderPrediction(data) {
             const high = (data.previsions_max || {})[fmt];
 
             setText(`pred-${fmt}`, data.previsions[fmt] || 0);
-            // Spread across the forest's trees: computed server-side all
-            // along, discarded by the old UI.
+            // 10th to 90th percentile of the day's total.
             setText(`range-${fmt}`,
                 (low === undefined || high === undefined) ? '' : `${low} – ${high}`);
         });
-    }
-
-    const endStock = el('end-stock');
-    if (endStock) {
-        if (data.stock_fin_prevu) {
-            el('end-stock-row').innerHTML = FORMATS.map(fmt => {
-                // Negative means the rest of the day should ask for more bags
-                // than are left: shown as the shortfall, not as "-14".
-                const n = data.stock_fin_prevu[fmt];
-                const value = n < 0 ? `rupture (manque ${esc(-n)})` : esc(n);
-                return `<span class="${n <= 0 ? 'stock-out' : FORMAT_CLASSES[fmt]}">` +
-                       `${esc(FORMAT_LABELS[fmt])} : ${value}</span>`;
-            }).join('');
-            endStock.style.display = 'block';
-        } else {
-            endStock.style.display = 'none';
-        }
     }
 
     setText('prediction-info', data.debug_info || 'Modèle prêt');
@@ -308,124 +290,6 @@ function renderTrend(debugInfo) {
         trendContainer.className = 'trend-badge stable';
         badgeText.innerText = `Tendance stable (${percent}%)`;
     }
-}
-
-// ---------------------------------------------------------------------------
-// Stock and closing
-// ---------------------------------------------------------------------------
-
-let stockData = null;
-
-function stockCell(fmt, entry) {
-    let value;
-    if (entry.status === 'incoherent') {
-        value = '<span class="stock-warn">⚠ stock incohérent</span>' +
-                '<span class="stock-hint">Vérifier le plan du jour</span>';
-    } else if (entry.remaining <= 0 && entry.status === 'sold_out') {
-        value = '<span class="stock-val stock-out">Épuisé</span>';
-    } else {
-        const cls = entry.remaining <= 0 ? 'stock-out' : FORMAT_CLASSES[fmt];
-        value = `<span class="stock-val ${cls}">${esc(entry.remaining)}</span>`;
-    }
-    return `<div class="w-col">${value}<span class="l">${esc(FORMAT_LABELS[fmt])}</span></div>`;
-}
-
-function updateStock() {
-    const strip = el('stock-strip');
-    if (!strip) return;
-    fetch('/api/stock')
-        .then(res => res.json())
-        .then(data => {
-            stockData = data;
-            // The sheet first: repacks and the closing are recorded whether
-            // or not anyone entered a plan this morning.
-            if (el('closing-sheet').style.display !== 'none') renderClosing();
-            strip.innerHTML = data.plan
-                ? `<div class="week-data">${FORMATS.map(fmt => stockCell(fmt, data.formats[fmt] || {})).join('')}</div>`
-                : '<div class="hist-empty">Aucun plan pour aujourd\'hui</div>';
-        })
-        .catch(err => console.error(err));
-}
-
-function renderClosing() {
-    const data = stockData || {};
-    const list = el('conversion-list');
-    const conversions = data.conversions || [];
-    list.innerHTML = conversions.length ? conversions.map(c =>
-        `<div class="hist-row"><span>${esc(c.source_bags)} × ${esc(FORMAT_LABELS[c.source] || c.source)} → ` +
-        `${esc(c.produced_bags)} × ${esc(FORMAT_LABELS[c.target] || c.target)}</span>` +
-        `<button class="btn-cancel" aria-label="Supprimer" onclick="deleteConversion(${Number(c.id)})">✕</button></div>`
-    ).join('') : '<div class="hist-empty">Aucun sac reconditionné</div>';
-    setText('closing-status', data.cloture ? `Clôture enregistrée ${data.cloture.saved_at.slice(11, 16)}` : '');
-}
-
-function openClosing() {
-    el('closing-sheet').style.display = 'flex';
-    el('closing-error').style.display = 'none';
-    // Prefilled once on open, not on every refresh, so a refresh never
-    // overwrites a number someone is typing.
-    const leftovers = (stockData && stockData.cloture && stockData.cloture.leftovers) || {};
-    FORMATS.forEach(fmt => {
-        const v = leftovers[fmt];
-        el(`left-${fmt}`).value = v === null || v === undefined ? '' : v;
-    });
-    renderClosing();
-    updateStock();
-}
-
-function closeClosing() {
-    el('closing-sheet').style.display = 'none';
-}
-
-function closingError(message) {
-    const node = el('closing-error');
-    node.textContent = message;
-    node.style.display = 'block';
-}
-
-function postJson(url, method, body) {
-    return fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
-    }).then(res => res.json().then(data => ({ ok: res.ok, data })));
-}
-
-function addConversion() {
-    const [source, target] = el('conv-pair').value.split('>');
-    const bags = Number(el('conv-bags').value);
-    postJson('/api/conversion', 'POST', { source, target, source_bags: bags })
-        .then(({ ok, data }) => {
-            if (!ok) return closingError(data.message || 'Erreur');
-            el('closing-error').style.display = 'none';
-            updateStock();
-        })
-        .catch(() => closingError('Connexion impossible, réessayez.'));
-}
-
-function deleteConversion(id) {
-    postJson(`/api/conversion/${id}`, 'DELETE')
-        .then(({ ok, data }) => {
-            if (!ok) return closingError(data.message || 'Erreur');
-            updateStock();
-        })
-        .catch(() => closingError('Connexion impossible, réessayez.'));
-}
-
-function saveClosing() {
-    const values = {};
-    let any = false;
-    FORMATS.forEach(fmt => {
-        const raw = el(`left-${fmt}`).value.trim();
-        if (raw !== '') { values[fmt] = Number(raw); any = true; }
-    });
-    postJson('/api/closing', 'POST', { leftovers: any ? values : null })
-        .then(({ ok, data }) => {
-            if (!ok) return closingError(data.message || 'Erreur');
-            el('closing-error').style.display = 'none';
-            updateStock();
-        })
-        .catch(() => closingError('Connexion impossible, réessayez.'));
 }
 
 // ---------------------------------------------------------------------------
@@ -515,149 +379,57 @@ function switchPredict(mode, btn) {
     } else {
         el('predict-day-content').style.display = 'none';
         el('predict-week-content').style.display = 'block';
-        loadPlan();
+        loadWeeklyForecast();
     }
 }
 
 // Refetched on every open. The old guard returned early whenever the
-// container already had content, so the view was frozen at whatever it
+// container already had content, so the 7-day view was frozen at whatever it
 // showed the first time until someone reloaded the whole page.
-function loadPlan() {
-    const container = el('plan-list');
+function loadWeeklyForecast() {
+    const container = el('week-list');
     const loading = el('loading-week');
     if (!container) return;
     if (loading) loading.style.display = 'block';
 
-    fetch('/api/plan')
+    fetch('/api/forecast_week')
         .then(res => res.json())
         .then(data => {
             if (loading) loading.style.display = 'none';
+
             if (!Array.isArray(data) || data.length === 0) {
                 container.innerHTML =
                     '<div class="model-status-text" style="text-align:center;">Données indisponibles.</div>';
                 return;
             }
-            // 0.10 reads as "1 jour sur 10": the planner's terms, not a percentage.
+
+            // 0.10 reads as "9 jours sur 10": the planner's terms, not a percentage.
             const target = Number(data[0].cible_rupture);
-            const intro = target > 0
-                ? `<div class="plan-intro">Recommandé pour manquer au plus 1 jour sur ${esc(Math.round(1 / target))}</div>`
+            const caption = target > 0
+                ? `<p class="week-caption">Sacs recommandés par format, prévus pour couvrir la demande ` +
+                  `${esc(Math.round((1 - target) * 10))} jours sur 10.</p>`
                 : '';
-            const heads = FORMATS.map(fmt =>
-                `<span class="${FORMAT_CLASSES[fmt]}">${esc(FORMAT_LABELS[fmt])}</span>`).join('');
-            container.innerHTML = intro + `<div class="plan-heads"><span></span>${heads}</div>` +
-                data.map(planCard).join('');
-            container.querySelectorAll('.plan-input').forEach(recHint);
-            container.oninput = event => {
-                if (event.target.classList.contains('plan-input')) markEdited(event.target);
-            };
+
+            container.innerHTML = caption + data.map(jour => {
+                const cols = FORMATS.map(fmt => {
+                    const bags = (jour.recommande || {})[fmt];
+                    return `<div class="w-col"><span class="v ${FORMAT_CLASSES[fmt]}">${esc(bags === undefined ? '–' : bags)}</span>` +
+                           `<span class="l">${esc(FORMAT_LABELS[fmt])}</span></div>`;
+                }).join('');
+
+                return `<div class="week-card">
+                    <div class="week-header">
+                        <span class="week-date">${esc(jour.date_affichee)}</span>
+                        <span class="week-meteo">${esc(jour.evenement || '')}</span>
+                    </div>
+                    <div class="week-data">${cols}</div>
+                </div>`;
+            }).join('');
         })
         .catch(() => {
             if (loading) loading.style.display = 'none';
             container.innerHTML =
                 '<div class="model-status-text" style="text-align:center;">Données indisponibles.</div>';
-        });
-}
-
-function savedLabel(stamp) {
-    return stamp ? `✓ ${esc(stamp.slice(11, 16))}` : '✓';
-}
-
-// Last week's same day, as the planner used to read it off paper: only what
-// happened that the numbers alone would not show.
-function lastWeekLine(week) {
-    if (!week) return '';
-    const parts = (week.conversions || []).map(c =>
-        `${esc(c.source_bags)}×${esc(c.source)}→${esc(c.target)}`);
-    (week.ruptures || []).forEach(fmt => parts.push(`rupture ${esc(fmt)}`));
-    (week.incoherent || []).forEach(fmt => parts.push(`${esc(fmt)} incohérent`));
-    return parts.length ? `<div class="plan-note">Sem. dern. : ${parts.join(' · ')}</div>` : '';
-}
-
-// The recommendation only shows when the box says something else: typed
-// over, or saved before the recommendation moved (then in orange).
-function recHint(input) {
-    const rec = input.dataset.rec;
-    const hint = input.nextElementSibling;
-    if (rec === '' || String(input.value).trim() === rec) {
-        hint.textContent = '';
-        return;
-    }
-    hint.textContent = `reco ${rec}`;
-    hint.classList.toggle('moved', input.dataset.moved === '1');
-}
-
-function markEdited(input) {
-    input.closest('.plan-card').classList.add('edited');
-    recHint(input);
-}
-
-function planCard(day) {
-    const saved = day.plan !== null && day.plan !== undefined;
-    const moved = day.changement || {};
-    const cells = FORMATS.map(fmt => {
-        const rec = (day.recommande || {})[fmt];
-        const value = saved ? day.plan[fmt] : (rec === undefined ? '' : rec);
-        return `<div class="plan-cell">
-            <input class="plan-input ${FORMAT_CLASSES[fmt]}" type="number" inputmode="numeric"
-                   min="0" max="999" step="1" aria-label="${esc(FORMAT_LABELS[fmt])}"
-                   data-format="${esc(fmt)}" data-rec="${esc(rec === undefined ? '' : rec)}"
-                   data-moved="${fmt in moved ? 1 : 0}" value="${esc(value)}">
-            <span class="plan-hint"></span>
-        </div>`;
-    }).join('');
-    const event = day.evenement ? `<span class="plan-event">${esc(day.evenement)}</span>` : '';
-
-    return `<div class="week-card plan-card${saved ? ' saved' : ''}" data-date="${esc(day.date)}">
-        <div class="plan-row">
-            <div class="plan-day">
-                <span class="week-date">${esc(day.date_affichee)}</span>${event}
-                <span class="plan-status">${saved ? savedLabel(day.plan_maj) : ''}</span>
-                <button class="btn-utility plan-save" onclick="savePlan('${esc(day.date)}')">Enregistrer</button>
-            </div>
-            ${cells}
-        </div>
-        ${lastWeekLine(day.semaine_derniere)}
-        <div class="plan-error" style="display: none;"></div>
-    </div>`;
-}
-
-function savePlan(date) {
-    const card = document.querySelector(`.plan-card[data-date="${date}"]`);
-    if (!card) return;
-    const error = card.querySelector('.plan-error');
-    const bags = {};
-    card.querySelectorAll('.plan-input').forEach(input => {
-        // Sent as typed; the server is the one place that decides what counts
-        // as a valid number of bags, and says why when it refuses.
-        const n = Number(input.value);
-        bags[input.dataset.format] = input.value.trim() === '' ? null : n;
-    });
-
-    fetch('/api/plan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date, bags }),
-    })
-        .then(res => res.json().then(body => ({ ok: res.ok, body })))
-        .then(({ ok, body }) => {
-            if (!ok) {
-                error.textContent = body.message || 'Erreur';
-                error.style.display = 'block';
-                return;
-            }
-            error.style.display = 'none';
-            card.classList.add('saved');
-            card.classList.remove('edited');
-            card.querySelector('.plan-status').innerHTML = savedLabel(body.plan_maj || localStamp(new Date()));
-            // Saved now against the current recommendation: no longer "moved".
-            card.querySelectorAll('.plan-input').forEach(input => {
-                input.dataset.moved = '0';
-                recHint(input);
-            });
-        })
-        .catch(() => {
-            error.textContent = 'Connexion impossible, réessayez.';
-            error.style.display = 'block';
         });
 }
 
@@ -791,10 +563,9 @@ document.addEventListener('DOMContentLoaded', () => {
     flushQueue();
     updateStats();
     updateHistory();
-    updateStock();
     checkOpenStatus();
 
-    setInterval(() => { updateStats(); updateHistory(); updateStock(); }, REFRESH_MS);
+    setInterval(() => { updateStats(); updateHistory(); }, REFRESH_MS);
     setInterval(checkOpenStatus, STATUS_MS);
     setInterval(flushQueue, FLUSH_MS);
 

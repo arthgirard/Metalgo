@@ -239,55 +239,6 @@ class TestWeatherAndTemperature:
                 < forecast.recommend(model, d, "250g", weather_score=2))
 
 
-class TestCensoring:
-    """
-    A confirmed sell-out says demand was at least what sold. Fitting on the
-    raw count teaches the model that sold-out days were quiet ones.
-    """
-
-    @staticmethod
-    def _capped_saturdays(n_capped):
-        daily = _daily(START, 42, {"250g": 40, "1kg": 25, "2kg": 3})
-        saturdays = list(daily.index[daily["weekday"] == 5])[-n_capped:]
-        daily.loc[saturdays, "250g"] = 35
-        daily["total"] = daily[list(FORMATS)].sum(axis=1)
-        censored = {(daily.loc[i, "date"], "250g"): 35 for i in saturdays}
-        return daily, censored
-
-    def test_censored_mean_is_at_least_the_sold_quantity(self):
-        assert forecast.censored_mean(30, 45, 30) > 30
-        assert forecast.censored_mean(30, 30, 30) > 30           # Poisson case
-        assert forecast.censored_mean(0, 0, 4) == 4
-
-    def test_threshold(self):
-        assert forecast.CENSOR_MIN_DAYS == 5
-
-    def test_censoring_raises_the_forecast_once_enough_days_exist(self):
-        daily, censored = self._capped_saturdays(6)
-        plain, as_of = _fit(daily)
-        with_censoring, _ = _fit(daily, censored=censored)
-        saturday = as_of + timedelta(days=(5 - as_of.weekday()) % 7)
-        assert forecast.mean(with_censoring, saturday, "250g") > forecast.mean(plain, saturday, "250g") + 2
-
-    def test_censoring_is_ignored_below_the_threshold(self):
-        daily, censored = self._capped_saturdays(4)
-        plain, as_of = _fit(daily)
-        with_censoring, _ = _fit(daily, censored=censored)
-        saturday = as_of + timedelta(days=(5 - as_of.weekday()) % 7)
-        assert forecast.mean(with_censoring, saturday, "250g") == forecast.mean(plain, saturday, "250g")
-
-    def test_censoring_one_format_leaves_the_others_alone(self):
-        """
-        1kg sold a steady 25 every day. Imputing 250g must not inflate it.
-        (The uncensored fit is actually the one pulled off 25: capped
-        Saturdays drag the shared level down.)
-        """
-        daily, censored = self._capped_saturdays(6)
-        with_censoring, as_of = _fit(daily, censored=censored)
-        saturday = as_of + timedelta(days=(5 - as_of.weekday()) % 7)
-        assert forecast.mean(with_censoring, saturday, "1kg") == pytest.approx(25, rel=0.03)
-
-
 class TestIntraday:
     """The live view: sold so far plus what the rest of the day should bring."""
 

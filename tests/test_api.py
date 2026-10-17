@@ -279,22 +279,11 @@ class TestPrediction:
         body = client.get('/api/prediction').get_json()
         assert body['previsions_min']['250g'] >= 30
 
-    def test_projected_end_stock_needs_a_plan(self, app_module, client, monkeypatch):
-        afternoon = datetime(2026, 8, 18, 14, 0, 0)
-        monkeypatch.setattr(app_module, "now_local", lambda: afternoon)
-        assert client.get('/api/prediction').get_json()['stock_fin_prevu'] is None
-
-    def test_projected_end_stock_with_a_plan(self, app_module, client, monkeypatch):
-        afternoon = datetime(2026, 8, 18, 14, 0, 0)
-        monkeypatch.setattr(app_module, "now_local", lambda: afternoon)
-        import stock
-        with app_module.get_conn() as conn:
-            stock.save_plan(conn, "2026-08-18", {"250g": 20, "1kg": 20, "2kg": 2}, None, afternoon)
-        for i in range(15):
-            _insert(app_module, f"2026-08-18 11:{i * 3:02d}:00", "250g")
-        body = client.get('/api/prediction').get_json()
-        # 5 left on the shelf with two and a half hours of selling to go.
-        assert body['stock_fin_prevu']['250g'] < 5
+    def test_payload_has_the_prediction_keys_only(self, app_module, client, monkeypatch):
+        monkeypatch.setattr(app_module, "now_local", lambda: datetime(2026, 8, 18, 14, 0, 0))
+        assert set(client.get('/api/prediction').get_json()) == {
+            "heures_restantes", "meteo", "previsions", "previsions_min", "previsions_max",
+            "evenement", "debug_info"}
 
 
 class TestPredictionWithoutModel:

@@ -44,16 +44,6 @@
                 </div>
             </div>
 
-            <!-- Bagged this morning, plus repacks, minus sales. Read-only here:
-                 the buttons above stay one press per bag and nothing else. -->
-            <section class="block-card stock-card">
-                <div class="header-split">
-                    <h2 class="block-title" style="margin: 0;">En stock</h2>
-                    <button class="btn-utility" onclick="openClosing()">Clôture</button>
-                </div>
-                <div id="stock-strip" class="stock-strip"></div>
-            </section>
-
             <section class="block-card">
                 <div class="header-split">
                     <h2 class="block-title" style="margin: 0;">Activité récente</h2>
@@ -133,7 +123,7 @@
 
             <div class="tabs-nav">
                 <button class="tab-pill active" onclick="switchPredict('day', this)">Aujourd'hui</button>
-                <button class="tab-pill" onclick="switchPredict('week', this)">Planification</button>
+                <button class="tab-pill" onclick="switchPredict('week', this)">7 Jours</button>
             </div>
 
             <div id="predict-day-content">
@@ -167,11 +157,9 @@
                         <span id="trend-badge-text">...</span>
                     </div>
 
-                    <!-- The range under each number is the model's measured
-                         error on held-out days, narrowing as the day gets
-                         locked in. Not the spread across the forest's trees,
-                         which only says how much the trees agree with each
-                         other and read as ±1 bag against a real error near 8. -->
+                    <!-- The range under each number is the 10th to 90th
+                         percentile of the day's total, narrowing as the day
+                         gets locked in. -->
                     <div class="prediction-grid">
                         <div class="pred-item">
                             <span class="pred-val color-250g" id="pred-250g">0</span>
@@ -190,11 +178,6 @@
                         </div>
                     </div>
 
-                    <div id="end-stock" class="end-stock" style="display: none;">
-                        <span class="end-stock-title">Stock prévu en fin de journée</span>
-                        <div class="end-stock-row" id="end-stock-row"></div>
-                    </div>
-
                     <div class="model-card">
                         <div class="model-info">
                             <span class="model-label">Statut IA</span>
@@ -208,10 +191,7 @@
 
             <div id="predict-week-content" style="display: none;">
                 <div id="loading-week" class="model-status-text" style="text-align: center; margin-top: 2rem;">Chargement...</div>
-                <!-- One card per open day. The bags typed here are what was
-                     really bagged that morning: without them a sell-out looks
-                     exactly like a quiet afternoon to the forecast. -->
-                <div id="plan-list" class="week-container"></div>
+                <div id="week-list" class="week-container"></div>
             </div>
         </div>
 
@@ -228,44 +208,6 @@
             </header>
 
             <div id="history-days-list" class="history-days-list"></div>
-        </div>
-    </div>
-
-    <!-- End of day: what was repacked, what is left, and the confirmation
-         that lets a quiet afternoon be told apart from a sell-out. -->
-    <div id="closing-sheet" class="sheet-backdrop" style="display: none;" onclick="if (event.target === this) closeClosing()">
-        <div class="sheet">
-            <div class="header-split">
-                <h2 class="block-title" style="margin: 0;">Clôture <span class="sheet-optional">facultatif</span></h2>
-                <button class="btn-utility" onclick="closeClosing()">Fermer</button>
-            </div>
-
-            <h3 class="sheet-sub">Sacs reconditionnés</h3>
-            <div id="conversion-list" class="conversion-list"></div>
-            <div class="conversion-form">
-                <span>Ouvert</span>
-                <input id="conv-bags" class="sheet-input" type="number" inputmode="numeric" min="1" max="999" step="1" value="1">
-                <span>×</span>
-                <select id="conv-pair" class="sheet-select">
-                    <option value="2kg>250g">2 kg → 250g</option>
-                    <option value="2kg>1kg">2 kg → 1 kg</option>
-                    <option value="1kg>250g">1 kg → 250g</option>
-                </select>
-                <button class="btn-utility" onclick="addConversion()">Ajouter</button>
-            </div>
-
-            <h3 class="sheet-sub">Restants</h3>
-            <div class="leftover-grid">
-                <label><span>250g</span><input id="left-250g" class="sheet-input" type="number" inputmode="numeric" min="0" max="999" step="1"></label>
-                <label><span>1 kg</span><input id="left-1kg" class="sheet-input" type="number" inputmode="numeric" min="0" max="999" step="1"></label>
-                <label><span>2 kg</span><input id="left-2kg" class="sheet-input" type="number" inputmode="numeric" min="0" max="999" step="1"></label>
-            </div>
-
-            <div class="plan-actions">
-                <span id="closing-status" class="plan-status"></span>
-                <button class="btn-utility btn-primary" onclick="saveClosing()">Enregistrer la clôture</button>
-            </div>
-            <div id="closing-error" class="plan-error" style="display: none;"></div>
         </div>
     </div>
 

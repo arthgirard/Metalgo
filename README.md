@@ -2,16 +2,15 @@
 
 **Metalgo** is a bespoke inventory management and sales prediction system developed for **Fromagerie Le Métayer (https://fromagerielemetayer.com)**.
 
-It is designed to solve a specific challenge in fresh cheese curd production: curds are bagged once, in the morning, in three formats (250g, 1kg, 2kg), and nothing is bagged later in the day. Metalgo recommends how many bags of each format to prepare, records what was really bagged, and learns from the days that sold out.
+It is designed to solve a specific challenge in fresh cheese curd production: curds are bagged once, in the morning, in three formats (250g, 1kg, 2kg), and nothing is bagged later in the day. Metalgo predicts the day's sales and recommends how many bags of each format to prepare.
 
-Staff log each bag sold with one press of a USB button by the register. Those presses and the morning plans are all the data the forecast needs; the end-of-day closing is optional.
+Staff log each bag sold with one press of a USB button by the register. Those presses are all the data the forecast needs.
 
 ## 🚀 Key Features
 
 * **Real-Time Dashboard:** Live tracking of sales volume, peak hours, and total mass.
-* **Morning bagging plan:** For today and the next seven calendar days (closed days skipped), a recommended number of bags per format, chosen so a format runs out on about one day in ten. The planner can fill in several days ahead (a whole weekend on Thursday); the bags typed in are saved as the day's plan, and a later change in the recommendation is flagged without overwriting it.
-* **Counter stock and closing:** The Saisie tab shows the bags left of each format. The optional **Clôture** sheet records repacked bags (2kg → 250g, 2kg → 1kg, 1kg → 250g) and leftovers. A day with a plan is enough to tell a real sell-out apart from a quiet afternoon; a forgotten closing only loses the leftover check.
-* **Same-day forecast:** The Aujourd'hui view shows the day's expected total per format, adjusted to how many customers have come in so far, and the stock expected to be left at closing.
+* **7-day bagging recommendation:** For today and the next seven calendar days (closed days skipped), the number of bags to prepare per format, chosen so a format runs out on about one day in ten. A whole weekend can be prepared two days ahead.
+* **Same-day forecast:** The Aujourd'hui view shows the day's expected total per format and its likely range, adjusted to how many customers have come in so far.
 * **Context Awareness:**
     * **Weather Integration:** Fetches current conditions, an hour-by-hour curve for today, and a 7-day outlook (via Open-Meteo). Weather is also sampled on a timer while the shop is open, independently of whether anything sells.
     * **Event Detection:** Detects Québec holidays, fixed occasions (St-Jean, Halloween), moving ones (Easter, Super Bowl) and Canadiens game days, and learns each one's real effect from history.
@@ -70,13 +69,11 @@ model: what matters is the number of bags to prepare each morning.
   *reaches* the stock is at most 10% (`SELLOUT_TARGET`). Leftovers are
   sold the next morning or reground, so the target leans towards having
   enough.
-* **Sell-outs.** Once a day with a plan is over, a format whose sales
-  reached its stock (within one bag) while other formats kept selling is a
-  sell-out, closing record or not. A leftover typed at closing vetoes it,
-  and sales beyond the stock (an unrecorded repack, early plant orders) mark
-  the day incoherent rather than sold out. Its sales understate demand, so once a format has
-  at least 5 such days (`CENSOR_MIN_DAYS`) they are replaced by the expected
-  demand given that it reached the stock.
+* **Sell-outs are not corrected for.** A day a format ran out understates
+  its demand. On the history to 2026-10-17, only 8 of 354 format-days show a
+  format going silent while the others kept selling, all after 15h, so the
+  effect is a few bags late in the day and the model does not try to
+  correct it.
 * **Switched off on measurement.** NHL games, weather and temperature are
   available as switches in `forecast.py`, but each made the walk-forward
   error worse on the current history and is off.
@@ -118,8 +115,7 @@ On the history as of 2026-10-17, the day-total error at D+0 / D+1 / D+2 is
 11.27 / 11.44 / 11.60 bags, against 12.27 / 12.27 / 12.20 for the retired
 random forest and 12.21 for the same-weekday mean. Sell-outs at the
 recommendation run at 10–11%. That rate is measured on history that is
-itself cut short by real sell-outs, so it is optimistic until planned
-days accumulate.
+itself cut short by the few real sell-outs, so it is slightly optimistic.
 
 ## 🧪 Tests
 
@@ -127,10 +123,10 @@ days accumulate.
 
 Covers the opening-hours, closed-date and weekday-convention helpers, event
 detection (including Easter and Super Bowl math and the years where two events
-collide), the learned event multipliers, the demand model and its spread,
-sell-out detection and censoring, the nightly fit and its gate, the evaluation
-harness, the plan, stock, conversion and closing endpoints, input validation,
-undo scoping, snapshot pruning and the prediction payload.
+collide), the learned event multipliers, the demand model and its spread, the
+same-day correction, the nightly fit and its gate, the evaluation harness,
+the 7-day forecast endpoint, input validation, undo scoping, snapshot
+pruning and the prediction payload.
 
 ## 🌍 Localization
 
@@ -150,11 +146,10 @@ Two weekday conventions coexist: `daily_snapshots.weekday` and the demand
 model use Python's (Monday = 0), while SQL queries read SQLite's
 `strftime('%w')` (Sunday = 0). All conversions go through `shop_schedule.py`.
 
-Planning and closing live in four tables created at startup (`stock.py`):
-`bagging_plan` (bags per format per date, often saved days ahead),
-`conversions` (bags opened and repacked), `closing_record` (optional
-end-of-day leftovers) and `forecast_log` (every nightly
-recommendation, for later comparison).
+`forecast_log` (`forecast_log.py`) keeps every nightly recommendation, so
+forecasts can later be compared with what sold. Databases that ran an
+earlier build may also hold empty `bagging_plan`, `conversions` and
+`closing_record` tables; nothing reads them.
 
 ## 📄 License
 

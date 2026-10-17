@@ -79,11 +79,6 @@ USE_NHL = False
 USE_WEATHER = False
 USE_TEMPERATURE = False
 
-# Censoring switches on per format only once this many confirmed sell-out
-# days exist for it. There is no historical record of bagging counts, so for
-# a while there will be none, and a couple of days would only add noise.
-CENSOR_MIN_DAYS = 5
-
 # Shrinkage: a weather band or a temperature slope seen on few days stays
 # close to "no effect".
 WEATHER_SHRINK_DAYS = 10
@@ -196,64 +191,14 @@ def _temperature_slope(days, ratio, temperature_by_day):
     return {"t_mean": t_mean, "slope": slope * n / (n + TEMPERATURE_SHRINK_DAYS)}
 
 
-def censored_mean(mu, var, sold):
-    """E[D | D >= sold] for demand with this mean and variance."""
-    if mu <= 0 or sold <= 0:
-        return float(max(sold, 0))
-    ks = np.arange(sold)
-    if var <= mu:
-        pmf, tail = poisson.pmf(ks, mu), poisson.sf(sold - 1, mu)
-    else:
-        n, p = mu ** 2 / (var - mu), mu / var
-        pmf, tail = nbinom.pmf(ks, n, p), nbinom.sf(sold - 1, n, p)
-    if tail < 1e-12:
-        return float(sold)
-    return float(max(sold, (mu - (ks * pmf).sum()) / tail))
-
-
-def _impute_censored(days, censored, basket_factor):
-    """
-    Replace each confirmed sell-out with the demand it implies.
-
-    Per format, and only for formats with at least CENSOR_MIN_DAYS such days.
-    The expectation for each day comes from the days before it, as an
-    uncensored fit would have made it then. Other formats on the same day
-    keep their real counts: customers mostly leave rather than switch.
-    """
-    dates = set(days["date"])
-    counts = {}
-    for (d, fmt) in censored:
-        if d in dates:
-            counts[fmt] = counts.get(fmt, 0) + 1
-    active = [fmt for fmt, n in counts.items() if n >= CENSOR_MIN_DAYS]
-    if not active:
-        return days
-
-    k = _dispersion(days, basket_factor)
-    imputed = days.astype({fmt: float for fmt in active})
-    for i in range(MIN_FIT_DAYS, len(days)):
-        day = days.iloc[i]
-        for fmt in active:
-            sold = censored.get((day["date"], fmt))
-            if sold is None:
-                continue
-            level, idx, share, same = _components(days.iloc[:i])
-            mu = _blend(level, idx, share, same, int(day["weekday"]), fmt)
-            var = mu * basket_factor[fmt] + mu ** 2 / k[fmt]
-            imputed.at[i, fmt] = censored_mean(mu, var, sold)
-    imputed["total"] = imputed[FORMATS].sum(axis=1)
-    return imputed
-
-
 def fit(daily, baskets, profile, as_of, event_days=frozenset(),
-        weather_by_day=None, temperature_by_day=None, censored=None):
+        weather_by_day=None, temperature_by_day=None):
     """
     Fit on trading days strictly before `as_of`, leaving out `event_days`.
     Returns None when there are fewer than MIN_FIT_DAYS such days.
 
     `weather_by_day` ({date: score}) and `temperature_by_day` ({date: °C})
     are optional; given, the model learns a multiplier for each.
-    `censored` ({(date, format): bags sold}) marks confirmed sell-outs.
     """
     days = daily[(daily["date"] < as_of) & ~daily["date"].isin(set(event_days))]
     days = days.sort_values("date").reset_index(drop=True)
@@ -262,8 +207,6 @@ def fit(daily, baskets, profile, as_of, event_days=frozenset(),
 
     past_baskets = baskets[baskets["date"] < as_of] if not baskets.empty else baskets
     factor = _basket_factor(past_baskets)
-    if censored:
-        days = _impute_censored(days, censored, factor)
 
     level, idx, share, same = _components(days)
     per_customer = (float(past_baskets[FORMATS].sum(axis=1).mean())

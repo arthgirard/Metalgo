@@ -127,13 +127,6 @@ def hourly_profile(conn, before):
     return profile
 
 
-def sales_times(conn, day):
-    """Sorted sale timestamps per format for one day."""
-    rows = _load_rows(conn, None, day=day)
-    return {fmt: [ts.to_pydatetime() for ts in rows.loc[rows["detail"] == fmt, "ts"]]
-            for fmt in FORMATS}
-
-
 def daily_weather(conn, before):
     """
     {date: {"score", "temperature"}} for days before `before`.

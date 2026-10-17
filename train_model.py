@@ -16,9 +16,9 @@ import joblib
 import numpy as np
 
 import forecast
+import forecast_log
 import history
 import shop_schedule as sched
-import stock
 from event_service import get_event_key, get_special_event
 from meteo import get_weekly_forecast, now_local
 
@@ -76,7 +76,7 @@ def _fit_inputs(conn, before):
         "daily": daily,
         "baskets": history.load_baskets(conn, before),
         "profile": history.hourly_profile(conn, before),
-        "fit_kwargs": {"censored": stock.confirmed_sellouts(conn, before)},
+        "fit_kwargs": {},
     }
     if forecast.USE_EVENTS:
         inputs["fit_kwargs"]["event_days"] = {d for d in daily["date"] if get_event_key(d)}
@@ -175,7 +175,7 @@ def train_model(db_name=DB_NAME, model_path=MODEL_PATH):
     try:
         # The tables this writes to may not exist yet on a database the app
         # never opened; creating them is additive and idempotent.
-        stock.init_tables(conn)
+        forecast_log.init_table(conn)
         inputs = _fit_inputs(conn, today)
     finally:
         conn.close()
@@ -189,8 +189,7 @@ def train_model(db_name=DB_NAME, model_path=MODEL_PATH):
     gate = _light_gate(inputs)
     loses = gate["mae"] is not None and gate["mae"] > gate["baseline_mae"]
     broken = gate["mae"] is not None and gate["mae"] > gate["baseline_mae"] * GATE_TOLERANCE
-    metrics = {"status": "ok", "gate": gate, "n_days": len(inputs["daily"]),
-               "censored_days": len(inputs["fit_kwargs"]["censored"])}
+    metrics = {"status": "ok", "gate": gate, "n_days": len(inputs["daily"])}
 
     if broken and _has_current_payload(model_path):
         print(f"Nightly fit rejected: MAE {gate['mae']} vs baseline {gate['baseline_mae']}; "
@@ -235,7 +234,7 @@ def _record_forecasts(db_name, model, now):
                          "recommended": forecast.recommend(model, day, fmt, **kwargs)})
     conn = sqlite3.connect(db_name, timeout=30.0)
     try:
-        stock.record_forecast(conn, rows, now)
+        forecast_log.record(conn, rows, now)
         conn.commit()
     finally:
         conn.close()

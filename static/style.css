@@ -164,30 +164,11 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 .week-header { display: flex; justify-content: space-between; margin-bottom: 12px; border-bottom: 1px solid var(--border-soft); padding-bottom: 12px; }
 .week-date { font-weight: 700; font-size: 0.95rem; }
 .week-meteo { font-size: 0.85rem; color: var(--text-muted); }
+.week-caption { font-size: 0.8rem; color: var(--text-muted); font-weight: 600; text-align: center; margin: 0 0 4px; }
 .week-data { display: flex; justify-content: space-between; }
 .w-col { text-align: center; flex: 1; }
 .w-col .v { font-weight: 800; font-size: 1.1rem; display: block; }
 .w-col .l { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-top: 2px; display: block; }
-
-/* Planification: one compact row per day, the three boxes in fixed columns */
-.plan-intro { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; text-align: center; margin-bottom: 10px; }
-.plan-heads, .plan-row { display: grid; grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr)); gap: 8px; align-items: start; }
-.plan-heads { position: sticky; top: -20px; z-index: 1; background: var(--bg-app); padding: 6px 16px; font-size: 0.75rem; font-weight: 700; text-align: center; }
-.plan-day { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; min-width: 0; }
-.plan-event { font-size: 0.7rem; font-weight: 600; color: var(--brand-accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plan-cell { display: flex; flex-direction: column; align-items: center; }
-.plan-hint { font-size: 0.7rem; font-weight: 600; color: var(--range-text); min-height: 1.1em; margin-top: 2px; }
-.plan-hint.moved { color: var(--brand-accent); }
-.plan-note { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); margin-top: 6px; }
-.plan-card { padding: 12px 16px; }
-.plan-card .plan-status { font-size: 0.75rem; color: var(--text-muted); }
-.plan-card:not(.saved) .plan-status, .plan-card.edited .plan-status { display: none; }
-.plan-save { align-self: flex-start; margin-top: 4px; padding: 6px 8px; font-size: 0.7rem; }
-.plan-card.saved:not(.edited) .plan-save { display: none; }
-.plan-input { width: 100%; max-width: 76px; box-sizing: border-box; margin: 0 auto; display: block; text-align: center; font-size: 1.2rem; font-weight: 800; padding: 8px 4px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-app); }
-.plan-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; gap: 12px; }
-.plan-status { font-size: 0.8rem; font-weight: 700; color: var(--fmt-1kg); }
-.plan-error { font-size: 0.8rem; font-weight: 600; color: var(--danger); margin-top: 8px; }
 
 .bottom-bar {
     position: fixed; bottom: 0; width: 100%; height: 75px;
@@ -214,28 +195,3 @@ body[data-ouvert="false"] .status-pill { background: #F1F5F9; color: var(--text-
 .day-total-col { display: flex; flex-direction: column; align-items: center; }
 .day-expand { padding: 0 16px 16px 16px; }
 
-/* Saisie: stock left on the counter */
-.stock-strip { margin-top: 12px; }
-.stock-val { font-weight: 800; font-size: 1.4rem; display: block; }
-.stock-out { color: var(--danger) !important; font-weight: 800; }
-.stock-warn { display: block; font-size: 0.8rem; font-weight: 700; color: var(--brand-accent); }
-.stock-hint { display: block; font-size: 0.7rem; color: var(--text-muted); font-weight: 600; }
-
-
-/* Clôture sheet */
-.sheet-backdrop { position: fixed; inset: 0; background: rgba(61, 52, 43, 0.4); display: flex; align-items: flex-end; justify-content: center; z-index: 10; }
-.sheet { background: var(--bg-card); width: 100%; max-width: 560px; max-height: 85vh; overflow-y: auto; box-sizing: border-box; border-radius: 16px 16px 0 0; padding: 20px 16px calc(20px + env(safe-area-inset-bottom)); }
-.sheet-sub { font-size: 0.85rem; font-weight: 700; color: var(--text-muted); margin: 20px 0 8px; }
-.conversion-list { display: flex; flex-direction: column; gap: 6px; }
-.conversion-form { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; font-size: 0.9rem; font-weight: 600; }
-.sheet-input { width: 64px; box-sizing: border-box; text-align: center; font-size: 1rem; font-weight: 700; padding: 8px 4px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-app); }
-.sheet-select { font-size: 0.9rem; padding: 8px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-app); }
-.leftover-grid { display: flex; gap: 8px; }
-.leftover-grid label { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 0.75rem; font-weight: 600; color: var(--text-muted); }
-.leftover-grid .sheet-input { width: 100%; }
-.btn-primary { background: var(--brand-action); color: white; border-color: var(--brand-action); }
-
-.sheet-optional { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); margin-left: 6px; }
-.end-stock { margin-top: 16px; text-align: center; }
-.end-stock-title { display: block; font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-bottom: 6px; }
-.end-stock-row { display: flex; justify-content: center; gap: 16px; font-size: 0.9rem; font-weight: 700; flex-wrap: wrap; }
