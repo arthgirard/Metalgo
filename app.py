@@ -13,6 +13,7 @@ import pandas as pd
 from flask import Flask, jsonify, render_template, request
 
 import shop_schedule as sched
+import stock
 from event_service import get_event_key, get_game_info, get_special_event
 from meteo import (FALLBACK_TEMPERATURE, NEUTRAL_WEATHER_SCORE, get_current_weather,
                    get_today_hourly_weather, get_weekly_forecast, now_local, today_local,
@@ -130,6 +131,8 @@ def init_db():
         _ensure_column(conn, "logs", "temperature", "REAL")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_date ON logs(action_type, timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_weather_log_ts ON weather_log(timestamp)")
+        # Plans, conversions, closings and the forecast record.
+        stock.init_tables(conn)
 
 
 def snapshot_completed_days():
