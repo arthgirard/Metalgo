@@ -36,15 +36,9 @@ def test_lists_today_and_skips_closed_days(client, app_module, monkeypatch):
 def test_each_day_carries_a_recommendation_above_the_expected(client, fitted):
     day = _day(client, "2026-10-24")
     assert day["date_affichee"] == "Samedi 24"
-    assert set(day) == {"date", "date_affichee", "evenement", "attendu", "recommande", "cible_rupture"}
+    assert set(day) == {"date", "date_affichee", "evenement", "attendu", "recommande"}
     for fmt in ("250g", "1kg"):
         assert day["recommande"][fmt] > day["attendu"][fmt] > 0
-
-
-def test_each_day_states_the_sellout_target_behind_the_recommendation(client, fitted):
-    import forecast
-    assert all(d["cible_rupture"] == forecast.SELLOUT_TARGET == 0.10
-               for d in client.get('/api/forecast_week').get_json())
 
 
 def test_no_model_still_lists_days(client, app_module, monkeypatch):

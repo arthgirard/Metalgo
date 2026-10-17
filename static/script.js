@@ -403,14 +403,7 @@ function loadWeeklyForecast() {
                 return;
             }
 
-            // 0.10 reads as "9 jours sur 10": the planner's terms, not a percentage.
-            const target = Number(data[0].cible_rupture);
-            const caption = target > 0
-                ? `<p class="week-caption">Sacs recommandés par format, prévus pour couvrir la demande ` +
-                  `${esc(Math.round((1 - target) * 10))} jours sur 10.</p>`
-                : '';
-
-            container.innerHTML = caption + data.map(jour => {
+            container.innerHTML = data.map(jour => {
                 const cols = FORMATS.map(fmt => {
                     const bags = (jour.recommande || {})[fmt];
                     return `<div class="w-col"><span class="v ${FORMAT_CLASSES[fmt]}">${esc(bags === undefined ? '–' : bags)}</span>` +

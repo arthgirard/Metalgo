@@ -466,8 +466,6 @@ def forecast_week():
             "evenement": get_special_event(day, db_path=DB_NAME)[0],
             "attendu": expected,
             "recommande": recommended,
-            # The risk the recommendation is built to, shown with the list.
-            "cible_rupture": forecast.SELLOUT_TARGET,
         })
     return jsonify(result)
 
