@@ -174,6 +174,15 @@ def quantile(mu, var, q):
 
 
 def recommend(model, target, fmt, event_factor=1.0, target_sellout=SELLOUT_TARGET):
-    """Bags to prepare so the chance of selling out stays at `target_sellout`."""
+    """
+    Bags to prepare so the chance of selling out stays at `target_sellout`.
+
+    Selling out is demand *reaching* the stock — the last bag going empties
+    the shelf — so the answer is one more than the (1 - target) quantile:
+    P(D >= q + 1) = 1 - P(D <= q) <= target. Without the +1 the walk-forward
+    measured the shelf emptying on 14% of format-days against a 10% target.
+    """
     mu = mean(model, target, fmt, event_factor)
-    return quantile(mu, variance(model, fmt, mu), 1 - target_sellout)
+    if mu <= 0:
+        return 0
+    return quantile(mu, variance(model, fmt, mu), 1 - target_sellout) + 1

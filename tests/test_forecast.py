@@ -115,6 +115,23 @@ class TestSpread:
         assert (forecast.recommend(model, d, "250g", target_sellout=0.05)
                 >= forecast.recommend(model, d, "250g", target_sellout=0.20))
 
+    def test_chance_of_emptying_the_shelf_stays_within_target(self):
+        """
+        Selling out means demand reaches the stock, not only exceeds it:
+        the last bag going is the shelf going empty. So P(D >= recommended)
+        must be at most the target.
+        """
+        from scipy.stats import nbinom, poisson
+        daily = _daily(START, 30, {"250g": 40, "1kg": 25, "2kg": 3})
+        model, d = _fit(daily, _baskets(daily, size=2))
+        for fmt in FORMATS:
+            mu = forecast.mean(model, d, fmt)
+            var = forecast.variance(model, fmt, mu)
+            rec = forecast.recommend(model, d, fmt)
+            sf = (poisson.sf(rec - 1, mu) if var <= mu
+                  else nbinom.sf(rec - 1, n=mu ** 2 / (var - mu), p=mu / var))
+            assert sf <= forecast.SELLOUT_TARGET + 1e-9, fmt
+
     def test_default_target_is_ten_percent(self):
         assert forecast.SELLOUT_TARGET == 0.10
 

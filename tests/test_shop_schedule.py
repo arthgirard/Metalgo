@@ -102,7 +102,7 @@ class TestModelHyperparameters:
     """
 
     def test_depth_is_capped(self):
-        import train_model
+        import legacy_forest as train_model
         # Unconstrained, the forest memorised individual days: training error
         # ran at less than half the holdout error.
         assert train_model.RF_PARAMS.get("max_depth") is not None
@@ -110,7 +110,8 @@ class TestModelHyperparameters:
 
     def test_fit_and_evaluation_share_hyperparameters(self):
         """Otherwise the reported metrics describe a model nobody ships."""
-        import inspect, train_model
+        import inspect
+        import legacy_forest as train_model
         for fn in (train_model._fit, train_model._evaluate):
             source = inspect.getsource(fn)
             assert "RandomForestRegressor(**RF_PARAMS)" in source, fn.__name__
@@ -121,7 +122,7 @@ class TestModelHyperparameters:
         61 distinct values, smallest gap 0.046 °C) rather than a weather
         signal. It may return once per-hour readings accumulate.
         """
-        import train_model
+        import legacy_forest as train_model
         assert "temperature" not in train_model.FEATURE_COLUMNS
 
 
