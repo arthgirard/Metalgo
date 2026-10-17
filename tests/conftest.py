@@ -28,7 +28,8 @@ def app_module(tmp_path, monkeypatch):
     monkeypatch.setenv("METALGO_MODEL", str(model_path))
     monkeypatch.setenv("METALGO_NO_SCHEDULER", "1")
 
-    for name in ("app", "train_model", "event_service", "meteo", "shop_schedule"):
+    for name in ("app", "train_model", "event_service", "meteo", "shop_schedule",
+                 "history", "forecast", "stock", "legacy_forest", "backtest"):
         sys.modules.pop(name, None)
 
     import meteo

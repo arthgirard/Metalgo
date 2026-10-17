@@ -3,18 +3,7 @@ import math
 import pytest
 from datetime import datetime, timedelta
 
-
-def _insert(app_module, timestamp, detail, action_type="VENTE"):
-    with app_module.get_conn() as conn:
-        conn.execute(
-            "INSERT INTO logs (timestamp, action_type, detail, meteo_summary, temperature)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (timestamp, action_type, detail, "Ensoleillé", 20.0))
-
-
-def _count(app_module):
-    with app_module.get_conn() as conn:
-        return conn.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+from helpers import _count, _insert
 
 
 class TestLogValidation:

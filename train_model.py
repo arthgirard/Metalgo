@@ -10,15 +10,13 @@ from sklearn.ensemble import RandomForestRegressor
 
 import shop_schedule as sched
 from event_service import get_game_info
+from history import MIN_LOGS_THRESHOLD
 from meteo import FALLBACK_TEMPERATURE, NEUTRAL_WEATHER_SCORE, now_local, weather_score_from_label
 
 DB_NAME = "data.db"
 MODEL_PATH = "model.pkl"
 FORMATS = list(sched.FORMATS)
 
-# A day with fewer than this many sales is treated as a partial/abandoned
-# log rather than a genuinely quiet day, and excluded from training.
-MIN_LOGS_THRESHOLD = 10
 
 # Holdout evaluation only runs once there is enough history for the split to
 # mean anything; below this the metrics would be noise.
